@@ -599,36 +599,42 @@ class EatventureBot:
     def handle_transition_level(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
-        screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        max_attempts = 5
         
-        if "newLevel" in self.templates:
-            template, mask = self.templates["newLevel"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot, template, mask=mask,
-                threshold=config.NEW_LEVEL_THRESHOLD, template_name="newLevel"
-            )
+        for attempt in range(max_attempts):
+            screenshot = self.window_capture.capture()
+            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
             
-            if found:
-                logger.info(f"New level button found at ({x}, {y})")
-                self.mouse_controller.click(x, y, relative=True)
-                time.sleep(1.0)
+            if "newLevel" in self.templates:
+                template, mask = self.templates["newLevel"]
+                found, confidence, x, y = self.image_matcher.find_template(
+                    limited_screenshot, template, mask=mask,
+                    threshold=config.NEW_LEVEL_THRESHOLD, template_name="newLevel"
+                )
                 
-                self.total_levels_completed += 1
-                
-                time_spent = 0
-                if self.current_level_start_time:
-                    time_spent = (datetime.now() - self.current_level_start_time).total_seconds()
-                
-                self.current_level_start_time = datetime.now()
-                
-                self.telegram.notify_new_level(self.total_levels_completed, time_spent)
-                
-                logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
-                logger.info("Waiting for unlock button after level transition")
-                return State.WAIT_FOR_UNLOCK
+                if found:
+                    logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
+                    self.mouse_controller.click(x, y, relative=True)
+                    time.sleep(1.0)
+                    
+                    self.total_levels_completed += 1
+                    
+                    time_spent = 0
+                    if self.current_level_start_time:
+                        time_spent = (datetime.now() - self.current_level_start_time).total_seconds()
+                    
+                    self.current_level_start_time = datetime.now()
+                    
+                    self.telegram.notify_new_level(self.total_levels_completed, time_spent)
+                    
+                    logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
+                    logger.info("Waiting for unlock button after level transition")
+                    return State.WAIT_FOR_UNLOCK
+            
+            if attempt < max_attempts - 1:
+                time.sleep(0.2)
         
-        logger.warning("New level button not found")
+        logger.warning("New level button not found after 5 attempts")
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
