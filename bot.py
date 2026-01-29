@@ -574,24 +574,10 @@ class EatventureBot:
         self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
         time.sleep(0.3)
         
-        screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-        
-        if "upgradeStation" in self.templates:
-            template, mask = self.templates["upgradeStation"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot, template, mask=mask,
-                threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
-                check_color=config.UPGRADE_STATION_COLOR_CHECK
-            )
-            
-            if found:
-                logger.info(f"Upgrade station found at ({x}, {y}) for level transition")
-                self.mouse_controller.click(x, y, relative=True)
-                time.sleep(2.5)
-                return State.TRANSITION_LEVEL
-        
-        logger.warning("Upgrade station not found for level transition")
+        logger.info("Triggering follow-up click after new level check")
+        self.mouse_controller.click(166, 526, relative=True)
+        time.sleep(0.2)
+
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
