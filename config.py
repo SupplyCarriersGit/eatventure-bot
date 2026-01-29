@@ -6,11 +6,11 @@ WINDOW_WIDTH = 300 * 1.2
 WINDOW_HEIGHT = 650 * 1.2
 
 # Detection Thresholds
-MATCH_THRESHOLD = 0.98
-RED_ICON_THRESHOLD = 0.95
+MATCH_THRESHOLD = 0.95
+RED_ICON_THRESHOLD = 0.93
 RED_ICON_MIN_MATCHES = 1
-STATS_RED_ICON_THRESHOLD = 0.94
-SEARCH_INTERVAL = 0.5
+STATS_RED_ICON_THRESHOLD = 0.97
+SEARCH_INTERVAL = 0.9
 CLICK_DELAY = 0.1
 
 # Directory Paths
@@ -30,17 +30,17 @@ ShowForbiddenArea = False
 
 # Telegram Bot Configuration
 # TELEGRAM_ENABLED: Master switch to enable/disable all Telegram notifications
-# Set to True if you want to receive any Telegram messages from the bot
+# Set to True if you want to receive any Telegrazm messages from the bot
 TELEGRAM_ENABLED = False
 
 # TELEGRAM_BOT_TOKEN: Your Telegram bot API token from @BotFather
 # To get one: Message @BotFather on Telegram, use /newbot command
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+TELEGRAM_BOT_TOKEN = ""
 
 # TELEGRAM_CHAT_ID: Your Telegram chat ID to receive messages
 # To get it: Message your bot, then visit: https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 # Look for "chat":{"id": YOUR_CHAT_ID in the response
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID_HERE"
+TELEGRAM_CHAT_ID = ""
 
 # Game Element Detection
 MAX_SEARCH_Y = 660
@@ -59,7 +59,7 @@ SCROLL_END_POS = (170, 200)
 NEW_LEVEL_BUTTON_POS = (30, 692)
 
 # Template Matching Settings
-UPGRADE_STATION_THRESHOLD = 0.85
+UPGRADE_STATION_THRESHOLD = 0.95
 UPGRADE_STATION_COLOR_CHECK = True
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.9
