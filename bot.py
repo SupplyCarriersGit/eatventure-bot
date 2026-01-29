@@ -117,7 +117,8 @@ class EatventureBot:
         self.work_done = False
         
         screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+        limited_screenshot = screenshot[:limited_height, :]
         
         if "newLevel" in self.templates:
             template, mask = self.templates["newLevel"]
@@ -144,7 +145,10 @@ class EatventureBot:
             icons = self.image_matcher.find_all_templates(
                 limited_screenshot, template, mask=mask,
                 threshold=config.RED_ICON_THRESHOLD,
-                min_distance=80, template_name=template_name
+                min_distance=80,
+                scales=config.RED_ICON_SCALES,
+                template_name=template_name,
+                check_color=config.RED_ICON_COLOR_CHECK
             )
             
             for conf, x, y in icons:
@@ -158,11 +162,15 @@ class EatventureBot:
                 if not found_nearby:
                     all_detections[(x, y)] = [(template_name, conf)]
             
-            extended_screenshot = screenshot[:710, :]
+            extended_height = min(config.EXTENDED_SEARCH_Y, screenshot.shape[0])
+            extended_screenshot = screenshot[:extended_height, :]
             icons_extended = self.image_matcher.find_all_templates(
                 extended_screenshot, template, mask=mask,
                 threshold=config.RED_ICON_THRESHOLD,
-                min_distance=80, template_name=template_name
+                min_distance=80,
+                scales=config.RED_ICON_SCALES,
+                template_name=template_name,
+                check_color=config.RED_ICON_COLOR_CHECK
             )
             
             for conf, x, y in icons_extended:
@@ -281,7 +289,8 @@ class EatventureBot:
     
     def handle_check_unlock(self, current_state):
         screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+        limited_screenshot = screenshot[:limited_height, :]
         
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
@@ -305,7 +314,8 @@ class EatventureBot:
         
         for attempt in range(max_attempts):
             screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+            limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+            limited_screenshot = screenshot[:limited_height, :]
             
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
@@ -313,8 +323,12 @@ class EatventureBot:
                 current_threshold = config.UPGRADE_STATION_THRESHOLD if attempt < 2 else relaxed_threshold
                 
                 found, confidence, x, y = self.image_matcher.find_template(
-                    limited_screenshot, template, mask=mask,
-                    threshold=current_threshold, template_name="upgradeStation"
+                    limited_screenshot,
+                    template,
+                    mask=mask,
+                    threshold=current_threshold,
+                    template_name="upgradeStation",
+                    check_color=config.UPGRADE_STATION_COLOR_CHECK,
                 )
                 
                 if found:
@@ -343,6 +357,9 @@ class EatventureBot:
         import win32con
         
         x, y = self.upgrade_station_pos
+        if self.mouse_controller.is_in_forbidden_zone(x, y):
+            logger.warning(f"Upgrade station position ({x}, {y}) in forbidden zone, skipping hold")
+            return State.OPEN_BOXES
         win_x, win_y = self.mouse_controller.get_window_position()
         screen_x = win_x + x
         screen_y = win_y + y
@@ -363,7 +380,8 @@ class EatventureBot:
             elapsed_time += check_interval
             
             screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+            limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+            limited_screenshot = screenshot[:limited_height, :]
             
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
@@ -402,7 +420,8 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
         screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+        limited_screenshot = screenshot[:limited_height, :]
         
         if "newLevel" in self.templates:
             template, mask = self.templates["newLevel"]
@@ -415,7 +434,8 @@ class EatventureBot:
                 logger.info(f"New level detected during stats upgrade")
                 return State.TRANSITION_LEVEL
         
-        extended_screenshot = screenshot[:710, :]
+        extended_height = min(config.EXTENDED_SEARCH_Y, screenshot.shape[0])
+        extended_screenshot = screenshot[:extended_height, :]
         
         has_upgrade_icon = False
         red_icon_templates = ["RedIcon", "RedIcon2","RedIcon3","RedIcon4","RedIcon5","RedIcon6","RedIcon7","RedIcon8","RedIcon9","RedIcon10","RedIcon11", "RedIconNoBG"]
@@ -426,9 +446,14 @@ class EatventureBot:
             
             template, mask = self.templates[template_name]
             icons = self.image_matcher.find_all_templates(
-                extended_screenshot, template, mask=mask,
+                extended_screenshot,
+                template,
+                mask=mask,
                 threshold=config.STATS_RED_ICON_THRESHOLD,
-                min_distance=80, template_name=template_name
+                min_distance=80,
+                scales=config.RED_ICON_SCALES,
+                template_name=template_name,
+                check_color=config.RED_ICON_COLOR_CHECK,
             )
             
             for conf, x, y in icons:
@@ -460,7 +485,8 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
         screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+        limited_screenshot = screenshot[:limited_height, :]
         
         if "newLevel" in self.templates:
             template, mask = self.templates["newLevel"]
@@ -520,7 +546,8 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
         screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+        limited_screenshot = screenshot[:limited_height, :]
         
         if "newLevel" in self.templates:
             template, mask = self.templates["newLevel"]
@@ -584,7 +611,8 @@ class EatventureBot:
         
         for attempt in range(max_attempts):
             screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+            limited_height = min(config.MAX_SEARCH_Y, screenshot.shape[0])
+            limited_screenshot = screenshot[:limited_height, :]
             
             if "newLevel" in self.templates:
                 template, mask = self.templates["newLevel"]

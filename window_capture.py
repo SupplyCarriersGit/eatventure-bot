@@ -10,7 +10,10 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-ctypes.windll.shcore.SetProcessDpiAwareness(2)
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception as exc:
+    logger.warning(f"Failed to set DPI awareness: {exc}")
 
 
 class WindowCapture:
@@ -72,6 +75,9 @@ class WindowCapture:
         saveDC.SelectObject(saveBitMap)
         
         result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
+        if result != 1:
+            logger.debug("PrintWindow failed, falling back to BitBlt capture")
+            saveDC.BitBlt((0, 0), (width, height), mfcDC, (0, 0), win32con.SRCCOPY)
         
         bmpinfo = saveBitMap.GetInfo()
         bmpstr = saveBitMap.GetBitmapBits(True)
@@ -231,4 +237,3 @@ class ForbiddenAreaOverlay:
             win32gui.PostQuitMessage(0)
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
-
