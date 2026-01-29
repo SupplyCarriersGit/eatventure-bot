@@ -1,14 +1,14 @@
 # Window Configuration
 # WINDOW_TITLE: The exact title of the scrcpy window (visible at the top of the window)
 # To find it: Look at your scrcpy window's title bar, it usually shows your device model
-WINDOW_TITLE = "YOUR_WINDOW_TITLE_HERE"
+WINDOW_TITLE = "EatventureAuto"
 WINDOW_WIDTH = 300 * 1.2
 WINDOW_HEIGHT = 650 * 1.2
 
 # Detection Thresholds
 MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.95
-RED_ICON_MIN_MATCHES = 3
+RED_ICON_MIN_MATCHES = 1
 STATS_RED_ICON_THRESHOLD = 0.94
 SEARCH_INTERVAL = 0.5
 CLICK_DELAY = 0.1
@@ -59,8 +59,8 @@ SCROLL_END_POS = (170, 200)
 NEW_LEVEL_BUTTON_POS = (30, 692)
 
 # Template Matching Settings
-UPGRADE_STATION_THRESHOLD = 0.8
-UPGRADE_STATION_COLOR_CHECK = True
+UPGRADE_STATION_THRESHOLD = 0.85
+UPGRADE_STATION_COLOR_CHECK = False
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.9
 NEW_LEVEL_THRESHOLD = 0.98
