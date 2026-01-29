@@ -47,7 +47,8 @@ def on_press(key):
                 logger.info("[P pressed] Exiting program...")
                 should_exit = True
     except Exception as e:
-        pass
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error handling key press: {e}", exc_info=True)
 
 
 def setup_logging():
