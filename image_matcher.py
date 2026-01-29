@@ -91,7 +91,7 @@ class ImageMatcher:
         color_threshold = 0.7
         return avg_corr >= color_threshold
     
-    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
+    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown", check_color=False):
         thresh = threshold if threshold else self.threshold
         all_matches = []
         
@@ -125,6 +125,10 @@ class ImageMatcher:
                 confidence = 1 - result[pt[1], pt[0]]
                 center_x = pt[0] + w // 2
                 center_y = pt[1] + h // 2
+                if check_color:
+                    if not self._check_color_similarity(screenshot, scaled_template, pt, scaled_mask):
+                        logger.debug(f"[{template_name}] Color check failed at ({center_x}, {center_y}), confidence: {confidence:.2%}")
+                        continue
                 all_matches.append((confidence, center_x, center_y, w, h))
         
         if all_matches:
