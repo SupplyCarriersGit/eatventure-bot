@@ -91,7 +91,9 @@ class MouseController:
         self.click(x, y, relative)
         time.sleep(0.1)
     
-    def hold_at(self, x, y, duration=2.0, relative=True):
+    def hold_at(self, x, y, duration=None, relative=True):
+        if duration is None:
+            duration = config.UPGRADE_HOLD_DURATION
         if relative:
             if self.is_in_forbidden_zone(x, y):
                 return
