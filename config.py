@@ -26,7 +26,7 @@ SAVE_SCREENSHOTS = False
 # ShowForbiddenArea: Enables a visual overlay showing forbidden zones in red
 # When True, displays red rectangles over areas where the bot won't click
 # Useful for debugging and visualizing the forbidden zones configuration
-ShowForbiddenArea = True
+ShowForbiddenArea = False
 
 # Telegram Bot Configuration
 # TELEGRAM_ENABLED: Master switch to enable/disable all Telegram notifications
