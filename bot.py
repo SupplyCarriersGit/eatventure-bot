@@ -353,37 +353,9 @@ class EatventureBot:
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
         logger.info(f"Holding upgrade station...")
         
-        max_hold_time = 10.0
-        check_interval = 0.2
-        elapsed_time = 0.0
-        consecutive_not_found = 0
-        required_not_found = 2
-        
-        while elapsed_time < max_hold_time:
-            time.sleep(check_interval)
-            elapsed_time += check_interval
-            
-            screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-            
-            if "upgradeStation" in self.templates:
-                template, mask = self.templates["upgradeStation"]
-                found, confidence, found_x, found_y = self.image_matcher.find_template(
-                    limited_screenshot, template, mask=mask,
-                    threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
-                    check_color=config.UPGRADE_STATION_COLOR_CHECK
-                )
-                
-                if not found:
-                    consecutive_not_found += 1
-                    if consecutive_not_found >= required_not_found:
-                        logger.info(f"Hold released: upgradeStation disappeared ({elapsed_time:.1f}s)")
-                        break
-                else:
-                    consecutive_not_found = 0
-        
-        if elapsed_time >= max_hold_time:
-            logger.info(f"Hold released: max time reached ({elapsed_time:.1f}s)")
+        max_hold_time = config.UPGRADE_HOLD_DURATION
+        time.sleep(max_hold_time)
+        logger.info(f"Hold released: max time reached ({max_hold_time:.1f}s)")
         
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         
