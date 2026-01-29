@@ -353,11 +353,10 @@ class EatventureBot:
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
         logger.info(f"Holding upgrade station...")
         
-        max_hold_time = 10.0
+        max_hold_time = config.UPGRADE_HOLD_DURATION
         check_interval = 0.2
         elapsed_time = 0.0
-        consecutive_not_found = 0
-        required_not_found = 2
+        upgrade_missing_logged = False
         
         while elapsed_time < max_hold_time:
             time.sleep(check_interval)
@@ -374,13 +373,9 @@ class EatventureBot:
                     check_color=config.UPGRADE_STATION_COLOR_CHECK
                 )
                 
-                if not found:
-                    consecutive_not_found += 1
-                    if consecutive_not_found >= required_not_found:
-                        logger.info(f"Hold released: upgradeStation disappeared ({elapsed_time:.1f}s)")
-                        break
-                else:
-                    consecutive_not_found = 0
+                if not found and not upgrade_missing_logged:
+                    logger.info("Upgrade station not found while holding; continuing until hold duration completes.")
+                    upgrade_missing_logged = True
         
         if elapsed_time >= max_hold_time:
             logger.info(f"Hold released: max time reached ({elapsed_time:.1f}s)")
