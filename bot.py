@@ -456,8 +456,12 @@ class EatventureBot:
         
         start_time = time.monotonic()
         while time.monotonic() - start_time < config.STATS_UPGRADE_CLICK_DURATION:
-            self.mouse_controller.click(config.STATS_UPGRADE_POS[0], config.STATS_UPGRADE_POS[1], relative=True)
-            time.sleep(config.STATS_UPGRADE_CLICK_DELAY)
+            self.mouse_controller.click(
+                config.STATS_UPGRADE_POS[0],
+                config.STATS_UPGRADE_POS[1],
+                relative=True,
+                delay=config.STATS_UPGRADE_CLICK_DELAY,
+            )
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         logger.info("========== STAT UPGRADE COMPLETED ==========")
