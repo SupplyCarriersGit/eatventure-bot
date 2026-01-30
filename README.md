@@ -156,6 +156,12 @@ SCROLL_START_POS = (170, 380)    # Scroll start position
 SCROLL_END_POS = (170, 200)      # Scroll end position
 ```
 
+### Stats Upgrade Settings
+```python
+STATS_UPGRADE_CLICK_DURATION = 0.1   # Seconds to keep clicking upgrade
+STATS_UPGRADE_CLICK_INTERVAL = 0.01  # Delay between spam clicks
+```
+
 ### Forbidden Zones
 
 Forbidden zones prevent the bot from clicking on critical UI elements. Each zone is defined by X and Y coordinate boundaries:
@@ -220,6 +226,12 @@ IDLE_CLICK_POS = (2, 390)        # Safe idle click position
 STATS_UPGRADE_POS = (270, 304)   # Stats upgrade button
 SCROLL_START_POS = (170, 380)    # Scroll start position
 SCROLL_END_POS = (170, 200)      # Scroll end position
+```
+
+### Stats Upgrade Settings
+```python
+STATS_UPGRADE_CLICK_DURATION = 0.1   # Seconds to keep clicking upgrade
+STATS_UPGRADE_CLICK_INTERVAL = 0.01  # Delay between spam clicks
 ```
 
 ### Forbidden Zones
