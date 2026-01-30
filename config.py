@@ -31,7 +31,7 @@ ShowForbiddenArea = False
 # Telegram Bot Configuration
 # TELEGRAM_ENABLED: Master switch to enable/disable all Telegram notifications
 # Set to True if you want to receive any Telegrazm messages from the bot
-TELEGRAM_ENABLED = True
+TELEGRAM_ENABLED = False
 
 # TELEGRAM_BOT_TOKEN: Your Telegram bot API token from @BotFather
 # To get one: Message @BotFather on Telegram, use /newbot command
