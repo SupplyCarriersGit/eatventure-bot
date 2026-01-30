@@ -50,6 +50,10 @@ class EatventureBot:
         self.current_level_start_time = None
         
         self.telegram = TelegramNotifier(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID, config.TELEGRAM_ENABLED)
+        self.red_icon_templates = [
+            "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
+            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
+        ]
         
         self.overlay = None
         if config.ShowForbiddenArea:
@@ -70,6 +74,22 @@ class EatventureBot:
             logger.info("Forbidden area overlay enabled and started")
         
         logger.info("Bot initialized successfully")
+
+    def _capture(self, max_y=None):
+        return self.window_capture.capture(max_y=max_y)
+
+    def _find_new_level(self, screenshot, threshold=None):
+        if "newLevel" not in self.templates:
+            return False, 0.0, 0, 0
+
+        template, mask = self.templates["newLevel"]
+        return self.image_matcher.find_template(
+            screenshot,
+            template,
+            mask=mask,
+            threshold=threshold or config.NEW_LEVEL_THRESHOLD,
+            template_name="newLevel",
+        )
     
     def load_templates(self):
         templates = {}
@@ -116,56 +136,31 @@ class EatventureBot:
         
         self.work_done = False
         
-        screenshot = self.window_capture.capture()
+        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-        
-        if "newLevel" in self.templates:
-            template, mask = self.templates["newLevel"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot, template, mask=mask,
-                threshold=config.NEW_LEVEL_THRESHOLD
-            )
-            
-            if found:
-                logger.info(f"newLevel.png found at ({x}, {y}), transitioning to new level")
-                return State.TRANSITION_LEVEL
-        
-        red_icon_templates = ["RedIcon", "RedIcon2","RedIcon3","RedIcon4","RedIcon5","RedIcon6","RedIcon7","RedIcon8","RedIcon9","RedIcon10","RedIcon11", "RedIconNoBG"]
+
+        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        if found:
+            logger.info(f"newLevel.png found at ({x}, {y}), transitioning to new level")
+            return State.TRANSITION_LEVEL
         
         all_detections = {}
         all_detections_extended = {}
         
-        for template_name in red_icon_templates:
+        for template_name in self.red_icon_templates:
             if template_name not in self.templates:
                 continue
             
             template, mask = self.templates[template_name]
             
             icons = self.image_matcher.find_all_templates(
-                limited_screenshot, template, mask=mask,
+                screenshot, template, mask=mask,
                 threshold=config.RED_ICON_THRESHOLD,
-                min_distance=80, template_name=template_name
+                min_distance=80,
+                template_name=template_name,
             )
             
             for conf, x, y in icons:
-                found_nearby = False
-                for (px, py) in list(all_detections.keys()):
-                    if abs(x - px) < 10 and abs(y - py) < 10:
-                        all_detections[(px, py)].append((template_name, conf))
-                        found_nearby = True
-                        break
-                
-                if not found_nearby:
-                    all_detections[(x, y)] = [(template_name, conf)]
-            
-            extended_screenshot = screenshot[:710, :]
-            icons_extended = self.image_matcher.find_all_templates(
-                extended_screenshot, template, mask=mask,
-                threshold=config.RED_ICON_THRESHOLD,
-                min_distance=80, template_name=template_name
-            )
-            
-            for conf, x, y in icons_extended:
                 found_nearby = False
                 for (px, py) in list(all_detections_extended.keys()):
                     if abs(x - px) < 10 and abs(y - py) < 10:
@@ -175,6 +170,17 @@ class EatventureBot:
                 
                 if not found_nearby:
                     all_detections_extended[(x, y)] = [(template_name, conf)]
+
+                if y <= config.MAX_SEARCH_Y:
+                    found_nearby = False
+                    for (px, py) in list(all_detections.keys()):
+                        if abs(x - px) < 10 and abs(y - py) < 10:
+                            all_detections[(px, py)].append((template_name, conf))
+                            found_nearby = True
+                            break
+
+                    if not found_nearby:
+                        all_detections[(x, y)] = [(template_name, conf)]
         
         min_matches = config.RED_ICON_MIN_MATCHES
         total_detections = len(all_detections)
@@ -280,8 +286,7 @@ class EatventureBot:
         return State.CHECK_UNLOCK
     
     def handle_check_unlock(self, current_state):
-        screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
@@ -304,8 +309,7 @@ class EatventureBot:
         relaxed_threshold = config.UPGRADE_STATION_THRESHOLD - 0.05
         
         for attempt in range(max_attempts):
-            screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
             
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
@@ -369,8 +373,7 @@ class EatventureBot:
             time.sleep(click_interval)
             
             if elapsed_time - last_check_time >= check_interval:
-                screenshot = self.window_capture.capture()
-                limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
                 
                 if "upgradeStation" in self.templates:
                     template, mask = self.templates["upgradeStation"]
@@ -407,26 +410,17 @@ class EatventureBot:
         logger.info("⬆ Stats upgrade starting")
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
-        screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-        
-        if "newLevel" in self.templates:
-            template, mask = self.templates["newLevel"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot, template, mask=mask,
-                threshold=config.NEW_LEVEL_THRESHOLD
-            )
-            
-            if found:
-                logger.info(f"New level detected during stats upgrade")
-                return State.TRANSITION_LEVEL
-        
-        extended_screenshot = screenshot[:710, :]
+        extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
+
+        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        if found:
+            logger.info("New level detected during stats upgrade")
+            return State.TRANSITION_LEVEL
         
         has_upgrade_icon = False
-        red_icon_templates = ["RedIcon", "RedIcon2","RedIcon3","RedIcon4","RedIcon5","RedIcon6","RedIcon7","RedIcon8","RedIcon9","RedIcon10","RedIcon11", "RedIconNoBG"]
-        
-        for template_name in red_icon_templates:
+
+        for template_name in self.red_icon_templates:
             if template_name not in self.templates:
                 continue
             
@@ -470,19 +464,12 @@ class EatventureBot:
     def handle_open_boxes(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
-        screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-        
-        if "newLevel" in self.templates:
-            template, mask = self.templates["newLevel"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot, template, mask=mask,
-                threshold=config.NEW_LEVEL_THRESHOLD
-            )
-            
-            if found:
-                logger.info(f"New level found, transitioning")
-                return State.TRANSITION_LEVEL
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+
+        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        if found:
+            logger.info("New level found, transitioning")
+            return State.TRANSITION_LEVEL
         
         box_names = ["box1", "box2", "box3", "box4", "box5"]
         boxes_found = 0
@@ -530,19 +517,12 @@ class EatventureBot:
     def handle_scroll(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
-        screenshot = self.window_capture.capture()
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-        
-        if "newLevel" in self.templates:
-            template, mask = self.templates["newLevel"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot, template, mask=mask,
-                threshold=config.NEW_LEVEL_THRESHOLD
-            )
-            
-            if found:
-                logger.info(f"New level detected before scroll")
-                return State.TRANSITION_LEVEL
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+
+        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        if found:
+            logger.info("New level detected before scroll")
+            return State.TRANSITION_LEVEL
         
         if self.scroll_direction == 'up':
             logger.info(f"⬆ Scroll UP ({self.scroll_count + 1}/{self.max_scroll_count})")
@@ -594,34 +574,27 @@ class EatventureBot:
         max_attempts = 5
         
         for attempt in range(max_attempts):
-            screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-            
-            if "newLevel" in self.templates:
-                template, mask = self.templates["newLevel"]
-                found, confidence, x, y = self.image_matcher.find_template(
-                    limited_screenshot, template, mask=mask,
-                    threshold=config.NEW_LEVEL_THRESHOLD, template_name="newLevel"
-                )
-                
-                if found:
-                    logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
-                    self.mouse_controller.click(x, y, relative=True)
-                    time.sleep(1.0)
-                    
-                    self.total_levels_completed += 1
-                    
-                    time_spent = 0
-                    if self.current_level_start_time:
-                        time_spent = (datetime.now() - self.current_level_start_time).total_seconds()
-                    
-                    self.current_level_start_time = datetime.now()
-                    
-                    self.telegram.notify_new_level(self.total_levels_completed, time_spent)
-                    
-                    logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
-                    logger.info("Waiting for unlock button after level transition")
-                    return State.WAIT_FOR_UNLOCK
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+
+            found, confidence, x, y = self._find_new_level(limited_screenshot)
+            if found:
+                logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
+                self.mouse_controller.click(x, y, relative=True)
+                time.sleep(1.0)
+
+                self.total_levels_completed += 1
+
+                time_spent = 0
+                if self.current_level_start_time:
+                    time_spent = (datetime.now() - self.current_level_start_time).total_seconds()
+
+                self.current_level_start_time = datetime.now()
+
+                self.telegram.notify_new_level(self.total_levels_completed, time_spent)
+
+                logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
+                logger.info("Waiting for unlock button after level transition")
+                return State.WAIT_FOR_UNLOCK
             
             if attempt < max_attempts - 1:
                 time.sleep(0.2)
@@ -645,15 +618,15 @@ class EatventureBot:
             self.scroll_count = 0
             return State.FIND_RED_ICONS
         
-        screenshot = self.window_capture.capture()
-        
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
             found, confidence, x, y = self.image_matcher.find_template(
                 screenshot, template, mask=mask,
                 threshold=config.UNLOCK_THRESHOLD, template_name="unlock"
             )
-            
+
             if found:
                 logger.info(f"Unlock button found at ({x}, {y}) after level transition")
                 self.mouse_controller.click(x, y, relative=True)
