@@ -62,7 +62,7 @@ class MouseController:
         win32api.SetCursorPos((int(screen_x), int(screen_y)))
         logger.info(f"Cursor moved to window position ({x}, {y})")
     
-    def click(self, x, y, relative=True):
+    def click(self, x, y, relative=True, delay=None):
         if relative:
             if self.is_in_forbidden_zone(x, y):
                 return
@@ -85,7 +85,7 @@ class MouseController:
         
         logger.info(f"Clicked at ({screen_x}, {screen_y})")
         
-        time.sleep(self.click_delay)
+        time.sleep(self.click_delay if delay is None else delay)
     
     def double_click(self, x, y, relative=True):
         self.click(x, y, relative)
