@@ -74,8 +74,6 @@ class MouseController:
             screen_x = x
             screen_y = y
         
-        current_pos = win32api.GetCursorPos()
-        
         win32api.SetCursorPos((screen_x, screen_y))
         time.sleep(0.02)
         

@@ -44,6 +44,7 @@ TELEGRAM_CHAT_ID = ""
 
 # Game Element Detection
 MAX_SEARCH_Y = 660
+EXTENDED_SEARCH_Y = 710
 
 # Click Positions (relative to window)
 UPGRADE_POS = (320, 726)
