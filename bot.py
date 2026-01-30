@@ -26,6 +26,7 @@ class EatventureBot:
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
         
         self.register_states()
+        self.state_machine.set_priority_resolver(self.resolve_priority_state)
         self.templates = self.load_templates()
         self.running = False
         self.red_icon_cycle_count = 0
@@ -74,6 +75,18 @@ class EatventureBot:
             logger.info("Forbidden area overlay enabled and started")
         
         logger.info("Bot initialized successfully")
+
+    def resolve_priority_state(self, current_state):
+        if current_state == State.TRANSITION_LEVEL:
+            return None
+
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        found, confidence, x, y = self._find_new_level(screenshot)
+        if found:
+            logger.info("Priority override: new level detected, transitioning immediately")
+            return State.TRANSITION_LEVEL
+
+        return None
 
     def _capture(self, max_y=None):
         return self.window_capture.capture(max_y=max_y)
