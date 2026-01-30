@@ -55,6 +55,8 @@ class EatventureBot:
             "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
             "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
         ]
+        self._capture_cache = {}
+        self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         
         self.overlay = None
         if config.ShowForbiddenArea:
@@ -77,19 +79,35 @@ class EatventureBot:
         logger.info("Bot initialized successfully")
 
     def resolve_priority_state(self, current_state):
-        if current_state == State.TRANSITION_LEVEL:
+        if current_state in {State.TRANSITION_LEVEL, State.HOLD_UPGRADE_STATION, State.WAIT_FOR_UNLOCK}:
             return None
 
-        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        found, confidence, x, y = self._find_new_level(screenshot)
+        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        found, confidence, x, y = self._find_new_level(limited_screenshot)
         if found:
             logger.info("Priority override: new level detected, transitioning immediately")
             return State.TRANSITION_LEVEL
 
+        if self._has_stats_upgrade_icon(screenshot):
+            logger.info("Priority override: stats upgrade available, upgrading immediately")
+            return State.UPGRADE_STATS
+
         return None
 
     def _capture(self, max_y=None):
-        return self.window_capture.capture(max_y=max_y)
+        cache_key = max_y if max_y is not None else "full"
+        cached = self._capture_cache.get(cache_key)
+        now = time.monotonic()
+        if cached and now - cached[0] <= self._capture_cache_ttl:
+            return cached[1]
+
+        frame = self.window_capture.capture(max_y=max_y)
+        self._capture_cache[cache_key] = (now, frame)
+        return frame
+
+    def _clear_capture_cache(self):
+        self._capture_cache.clear()
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -103,6 +121,40 @@ class EatventureBot:
             threshold=threshold or config.NEW_LEVEL_THRESHOLD,
             template_name="newLevel",
         )
+
+    def _has_stats_upgrade_icon(self, screenshot):
+        if not self.red_icon_templates:
+            return False
+
+        height, width = screenshot.shape[:2]
+        x_min = max(0, config.UPGRADE_RED_ICON_X_MIN - config.STATS_ICON_PADDING)
+        x_max = min(width, config.UPGRADE_RED_ICON_X_MAX + config.STATS_ICON_PADDING)
+        y_min = max(0, config.UPGRADE_RED_ICON_Y_MIN - config.STATS_ICON_PADDING)
+        y_max = min(height, config.UPGRADE_RED_ICON_Y_MAX + config.STATS_ICON_PADDING)
+
+        if x_min >= x_max or y_min >= y_max:
+            return False
+
+        roi = screenshot[y_min:y_max, x_min:x_max]
+
+        for template_name in self.red_icon_templates:
+            if template_name not in self.templates:
+                continue
+
+            template, mask = self.templates[template_name]
+            icons = self.image_matcher.find_all_templates(
+                roi,
+                template,
+                mask=mask,
+                threshold=config.STATS_RED_ICON_THRESHOLD,
+                min_distance=80,
+                template_name=template_name,
+            )
+
+            if icons:
+                return True
+
+        return False
     
     def load_templates(self):
         templates = {}
@@ -431,29 +483,7 @@ class EatventureBot:
             logger.info("New level detected during stats upgrade")
             return State.TRANSITION_LEVEL
         
-        has_upgrade_icon = False
-
-        for template_name in self.red_icon_templates:
-            if template_name not in self.templates:
-                continue
-            
-            template, mask = self.templates[template_name]
-            icons = self.image_matcher.find_all_templates(
-                extended_screenshot, template, mask=mask,
-                threshold=config.STATS_RED_ICON_THRESHOLD,
-                min_distance=80, template_name=template_name
-            )
-            
-            for conf, x, y in icons:
-                if (config.UPGRADE_RED_ICON_X_MIN <= x <= config.UPGRADE_RED_ICON_X_MAX and 
-                    config.UPGRADE_RED_ICON_Y_MIN <= y <= config.UPGRADE_RED_ICON_Y_MAX):
-                    has_upgrade_icon = True
-                    break
-            
-            if has_upgrade_icon:
-                break
-        
-        if not has_upgrade_icon:
+        if not self._has_stats_upgrade_icon(extended_screenshot):
             logger.info("✗ No stats icon, skipping")
             return State.SCROLL
         
@@ -663,7 +693,7 @@ class EatventureBot:
                     logger.error(f"Window '{config.WINDOW_TITLE}' is no longer active!")
                     break
                 
-                self.state_machine.update()
+                self.step()
                 
         except KeyboardInterrupt:
             logger.info("Bot stopped by user (Ctrl+C)")
@@ -671,6 +701,10 @@ class EatventureBot:
             logger.error(f"Bot error: {e}", exc_info=True)
         finally:
             self.stop()
+
+    def step(self):
+        self._clear_capture_cache()
+        self.state_machine.update()
     
     def stop(self):
         self.running = False
