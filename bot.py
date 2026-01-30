@@ -350,37 +350,43 @@ class EatventureBot:
         win32api.SetCursorPos((int(screen_x), int(screen_y)))
         time.sleep(0.05)
         
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
-        logger.info(f"Holding upgrade station...")
+        logger.info("Spamming upgrade station clicks...")
         
         max_hold_time = config.UPGRADE_HOLD_DURATION
+        click_interval = config.UPGRADE_CLICK_INTERVAL
         check_interval = 0.2
-        elapsed_time = 0.0
+        start_time = time.time()
+        last_check_time = 0.0
         upgrade_missing_logged = False
         
-        while elapsed_time < max_hold_time:
-            time.sleep(check_interval)
-            elapsed_time += check_interval
+        while True:
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= max_hold_time:
+                break
             
-            screenshot = self.window_capture.capture()
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, int(screen_x), int(screen_y), 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, int(screen_x), int(screen_y), 0, 0)
+            time.sleep(click_interval)
             
-            if "upgradeStation" in self.templates:
-                template, mask = self.templates["upgradeStation"]
-                found, confidence, found_x, found_y = self.image_matcher.find_template(
-                    limited_screenshot, template, mask=mask,
-                    threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
-                    check_color=config.UPGRADE_STATION_COLOR_CHECK
-                )
+            if elapsed_time - last_check_time >= check_interval:
+                screenshot = self.window_capture.capture()
+                limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
                 
-                if not found and not upgrade_missing_logged:
-                    logger.info("Upgrade station not found while holding; continuing until hold duration completes.")
-                    upgrade_missing_logged = True
+                if "upgradeStation" in self.templates:
+                    template, mask = self.templates["upgradeStation"]
+                    found, confidence, found_x, found_y = self.image_matcher.find_template(
+                        limited_screenshot, template, mask=mask,
+                        threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
+                        check_color=config.UPGRADE_STATION_COLOR_CHECK
+                    )
+                    
+                    if not found and not upgrade_missing_logged:
+                        logger.info("Upgrade station not found while clicking; continuing until duration completes.")
+                        upgrade_missing_logged = True
+                
+                last_check_time = elapsed_time
         
-        if elapsed_time >= max_hold_time:
-            logger.info(f"Hold released: max time reached ({elapsed_time:.1f}s)")
-        
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
+        logger.info(f"Clicking complete: max time reached ({elapsed_time:.1f}s)")
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         time.sleep(0.05)
