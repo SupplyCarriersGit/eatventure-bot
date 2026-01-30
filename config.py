@@ -10,8 +10,8 @@ MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.94
 RED_ICON_MIN_MATCHES = 2
 STATS_RED_ICON_THRESHOLD = 0.97
-SEARCH_INTERVAL = 1.0
-CLICK_DELAY = 0.4
+SEARCH_INTERVAL = 0.5
+CLICK_DELAY = 0.3
 
 # Directory Paths
 TEMPLATES_DIR = "templates"
@@ -31,7 +31,7 @@ ShowForbiddenArea = False
 # Telegram Bot Configuration
 # TELEGRAM_ENABLED: Master switch to enable/disable all Telegram notifications
 # Set to True if you want to receive any Telegrazm messages from the bot
-TELEGRAM_ENABLED = False
+TELEGRAM_ENABLED = True
 
 # TELEGRAM_BOT_TOKEN: Your Telegram bot API token from @BotFather
 # To get one: Message @BotFather on Telegram, use /newbot command
