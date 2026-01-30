@@ -94,6 +94,7 @@ class MouseController:
     def hold_at(self, x, y, duration=None, relative=True):
         if duration is None:
             duration = config.UPGRADE_HOLD_DURATION
+        click_interval = config.UPGRADE_CLICK_INTERVAL
         if relative:
             if self.is_in_forbidden_zone(x, y):
                 return
@@ -108,10 +109,18 @@ class MouseController:
         win32api.SetCursorPos((int(screen_x), int(screen_y)))
         time.sleep(0.02)
         
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
-        logger.info(f"Holding at ({screen_x}, {screen_y}) for {duration}s")
-        time.sleep(duration)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
+        logger.info(
+            "Spamming click at (%s, %s) every %ss for %ss",
+            screen_x,
+            screen_y,
+            click_interval,
+            duration,
+        )
+        end_time = time.monotonic() + duration
+        while time.monotonic() < end_time:
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
+            time.sleep(click_interval)
         
         time.sleep(self.click_delay)
     
