@@ -7,7 +7,7 @@ WINDOW_HEIGHT = 650 * 1.2
 
 # Detection Thresholds
 MATCH_THRESHOLD = 0.98
-RED_ICON_THRESHOLD = 0.9
+RED_ICON_THRESHOLD = 0.95
 RED_ICON_MIN_MATCHES = 1
 STATS_RED_ICON_THRESHOLD = 0.94
 SEARCH_INTERVAL = 1.0
@@ -44,11 +44,6 @@ TELEGRAM_CHAT_ID = ""
 
 # Game Element Detection
 MAX_SEARCH_Y = 660
-EXTENDED_SEARCH_Y = 710
-
-# Red Icon Detection Tuning
-RED_ICON_SCALES = [0.9, 1.0, 1.1]
-RED_ICON_COLOR_CHECK = True
 
 # Click Positions (relative to window)
 UPGRADE_POS = (320, 726)
