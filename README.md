@@ -159,7 +159,7 @@ SCROLL_END_POS = (170, 200)      # Scroll end position
 ### Stats Upgrade Settings
 ```python
 STATS_UPGRADE_CLICK_DURATION = 0.1   # Seconds to keep clicking upgrade
-STATS_UPGRADE_CLICK_INTERVAL = 0.01  # Delay between spam clicks
+STATS_UPGRADE_CLICK_INTERVAL = 0.005  # Delay between spam clicks
 ```
 
 ### Forbidden Zones
@@ -231,7 +231,7 @@ SCROLL_END_POS = (170, 200)      # Scroll end position
 ### Stats Upgrade Settings
 ```python
 STATS_UPGRADE_CLICK_DURATION = 0.1   # Seconds to keep clicking upgrade
-STATS_UPGRADE_CLICK_INTERVAL = 0.01  # Delay between spam clicks
+STATS_UPGRADE_CLICK_INTERVAL = 0.005  # Delay between spam clicks
 ```
 
 ### Forbidden Zones
