@@ -1,6 +1,5 @@
 import time
 import logging
-from pathlib import Path
 from datetime import datetime
 
 from window_capture import WindowCapture, ForbiddenAreaOverlay
@@ -8,6 +7,7 @@ from image_matcher import ImageMatcher
 from mouse_controller import MouseController
 from state_machine import StateMachine, State
 from telegram_notifier import TelegramNotifier
+from asset_scanner import AssetScanner
 import config
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,10 @@ class EatventureBot:
         
         self.register_states()
         self.state_machine.set_priority_resolver(self.resolve_priority_state)
+        self.red_icon_templates = [
+            "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
+            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
+        ]
         self.templates = self.load_templates()
         self.running = False
         self.red_icon_cycle_count = 0
@@ -50,10 +54,6 @@ class EatventureBot:
         self.current_level_start_time = None
         
         self.telegram = TelegramNotifier(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID, config.TELEGRAM_ENABLED)
-        self.red_icon_templates = [
-            "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
-            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
-        ]
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
@@ -177,23 +177,16 @@ class EatventureBot:
         return False
     
     def load_templates(self):
-        templates = {}
-        templates_path = Path(config.ASSETS_DIR)
-        
-        if not templates_path.exists():
-            logger.error(f"Assets directory not found: {templates_path}")
-            return templates
-        
-        for template_file in templates_path.glob("*.png"):
-            try:
-                template_name = template_file.stem
-                template_img = self.image_matcher.load_template(template_file)
-                templates[template_name] = template_img
-                logger.info(f"Loaded template: {template_name}")
-            except Exception as e:
-                logger.error(f"Failed to load template {template_file}: {e}")
-        
-        return templates
+        required_templates = self._required_template_names()
+        scanner = AssetScanner(self.image_matcher)
+        return scanner.scan(config.ASSETS_DIR, required_templates=required_templates)
+
+    def _required_template_names(self):
+        box_names = [f"box{i}" for i in range(1, 6)]
+        required = set(self.red_icon_templates)
+        required.update(["newLevel", "unlock", "upgradeStation"])
+        required.update(box_names)
+        return required
     
     def register_states(self):
         self.state_machine.register_handler(State.FIND_RED_ICONS, self.handle_find_red_icons)
