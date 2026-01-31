@@ -416,34 +416,23 @@ class EatventureBot:
         return State.OPEN_BOXES
     
     def handle_hold_upgrade_station(self, current_state):
-        import win32api
-        import win32con
-        
         x, y = self.upgrade_station_pos
-        win_x, win_y = self.mouse_controller.get_window_position()
-        screen_x = win_x + x
-        screen_y = win_y + y
-        
-        win32api.SetCursorPos((int(screen_x), int(screen_y)))
-        time.sleep(0.05)
         
         logger.info("Spamming upgrade station clicks...")
         
         max_hold_time = config.UPGRADE_HOLD_DURATION
         click_interval = config.UPGRADE_CLICK_INTERVAL
         check_interval = 0.2
-        start_time = time.time()
+        start_time = time.monotonic()
         last_check_time = 0.0
         upgrade_missing_logged = False
         
         while True:
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.monotonic() - start_time
             if elapsed_time >= max_hold_time:
                 break
             
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, int(screen_x), int(screen_y), 0, 0)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, int(screen_x), int(screen_y), 0, 0)
-            time.sleep(click_interval)
+            self.mouse_controller.click(x, y, relative=True, delay=click_interval)
             
             if elapsed_time - last_check_time >= check_interval:
                 limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)

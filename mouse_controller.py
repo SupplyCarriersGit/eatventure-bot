@@ -12,6 +12,28 @@ class MouseController:
     def __init__(self, hwnd, click_delay=0.1):
         self.hwnd = hwnd
         self.click_delay = click_delay
+
+    def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
+        if relative:
+            if check_forbidden and self.is_in_forbidden_zone(x, y):
+                return None
+
+            win_x, win_y = self.get_window_position()
+            screen_x = win_x + x
+            screen_y = win_y + y
+        else:
+            screen_x = x
+            screen_y = y
+
+        return int(screen_x), int(screen_y)
+
+    def _send_click(self, screen_x, screen_y, down_up_delay=None):
+        win32api.SetCursorPos((int(screen_x), int(screen_y)))
+        time.sleep(config.MOUSE_MOVE_DELAY)
+
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
+        time.sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
     
     def is_in_forbidden_zone(self, x, y):
         if (y >= config.FORBIDDEN_CLICK_Y_MIN and 
@@ -63,49 +85,34 @@ class MouseController:
         logger.info(f"Cursor moved to window position ({x}, {y})")
     
     def click(self, x, y, relative=True, delay=None):
-        if relative:
-            if self.is_in_forbidden_zone(x, y):
-                return
-            
-            win_x, win_y = self.get_window_position()
-            screen_x = win_x + x
-            screen_y = win_y + y
-        else:
-            screen_x = x
-            screen_y = y
-        
-        win32api.SetCursorPos((screen_x, screen_y))
-        time.sleep(0.02)
-        
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
-        time.sleep(0.02)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
-        
+        screen_pos = self._resolve_screen_position(x, y, relative=relative)
+        if screen_pos is None:
+            time.sleep(self.click_delay if delay is None else delay)
+            return False
+
+        screen_x, screen_y = screen_pos
+        self._send_click(screen_x, screen_y)
+
         logger.info(f"Clicked at ({screen_x}, {screen_y})")
-        
+
         time.sleep(self.click_delay if delay is None else delay)
+        return True
     
     def double_click(self, x, y, relative=True):
         self.click(x, y, relative)
-        time.sleep(0.1)
+        time.sleep(config.DOUBLE_CLICK_DELAY)
+        self.click(x, y, relative)
     
     def hold_at(self, x, y, duration=None, relative=True):
         if duration is None:
             duration = config.UPGRADE_HOLD_DURATION
         click_interval = config.UPGRADE_CLICK_INTERVAL
-        if relative:
-            if self.is_in_forbidden_zone(x, y):
-                return
-            
-            win_x, win_y = self.get_window_position()
-            screen_x = win_x + x
-            screen_y = win_y + y
-        else:
-            screen_x = x
-            screen_y = y
-        
-        win32api.SetCursorPos((int(screen_x), int(screen_y)))
-        time.sleep(0.02)
+
+        screen_pos = self._resolve_screen_position(x, y, relative=relative)
+        if screen_pos is None:
+            return False
+
+        screen_x, screen_y = screen_pos
         
         logger.info(
             "Spamming click at (%s, %s) every %ss for %ss",
@@ -116,11 +123,11 @@ class MouseController:
         )
         end_time = time.monotonic() + duration
         while time.monotonic() < end_time:
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
+            self._send_click(screen_x, screen_y)
             time.sleep(click_interval)
         
         time.sleep(self.click_delay)
+        return True
     
     def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True):
         if relative:
@@ -136,10 +143,10 @@ class MouseController:
             screen_to_y = to_y
         
         win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
-        time.sleep(0.02)
+        time.sleep(config.MOUSE_MOVE_DELAY)
         
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_from_x, screen_from_y, 0, 0)
-        time.sleep(0.02)
+        time.sleep(config.MOUSE_DOWN_UP_DELAY)
         
         steps = 20
         for i in range(steps + 1):
