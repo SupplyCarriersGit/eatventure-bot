@@ -56,6 +56,7 @@ class EatventureBot:
         ]
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
+        self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
         
         self.overlay = None
         if config.ShowForbiddenArea:
@@ -78,22 +79,22 @@ class EatventureBot:
         logger.info("Bot initialized successfully")
 
     def resolve_priority_state(self, current_state):
-        if current_state in {State.TRANSITION_LEVEL, State.HOLD_UPGRADE_STATION, State.WAIT_FOR_UNLOCK}:
-            return None
-
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        )
         if found:
             logger.info("Priority override: new level detected, transitioning immediately")
             return State.TRANSITION_LEVEL
 
         return None
 
-    def _capture(self, max_y=None):
+    def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
         cached = self._capture_cache.get(cache_key)
         now = time.monotonic()
-        if cached and now - cached[0] <= self._capture_cache_ttl:
+        if not force and cached and now - cached[0] <= self._capture_cache_ttl:
             return cached[1]
 
         frame = self.window_capture.capture(max_y=max_y)
@@ -102,6 +103,31 @@ class EatventureBot:
 
     def _clear_capture_cache(self):
         self._capture_cache.clear()
+        self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+
+    def _detect_new_level(self, screenshot=None, max_y=None, force=False):
+        target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
+        now = time.monotonic()
+        cached = self._new_level_cache
+        if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= self._capture_cache_ttl:
+            return cached["result"]
+
+        if screenshot is None:
+            screenshot = self._capture(max_y=target_max_y, force=force)
+
+        result = self._find_new_level(screenshot, threshold=config.NEW_LEVEL_THRESHOLD)
+        self._new_level_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
+        return result
+
+    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False):
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=screenshot,
+            max_y=max_y,
+            force=force,
+        )
+        if found:
+            logger.info("Priority override: new level detected, interrupting current action")
+        return found
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -198,7 +224,10 @@ class EatventureBot:
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
 
-        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        )
         if found:
             logger.info(f"newLevel.png found at ({x}, {y}), transitioning to new level")
             return State.TRANSITION_LEVEL
@@ -433,7 +462,7 @@ class EatventureBot:
             
             if elapsed_time - last_check_time >= check_interval:
                 limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-                
+
                 if "upgradeStation" in self.templates:
                     template, mask = self.templates["upgradeStation"]
                     found, confidence, found_x, found_y = self.image_matcher.find_template(
@@ -445,6 +474,12 @@ class EatventureBot:
                     if not found and not upgrade_missing_logged:
                         logger.info("Upgrade station not found while clicking; continuing until duration completes.")
                         upgrade_missing_logged = True
+
+                if self._should_interrupt_for_new_level(
+                    screenshot=limited_screenshot,
+                    max_y=config.MAX_SEARCH_Y,
+                ):
+                    return State.TRANSITION_LEVEL
                 
                 last_check_time = elapsed_time
         
@@ -465,7 +500,10 @@ class EatventureBot:
         extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
 
-        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        )
         if found:
             logger.info("New level detected during stats upgrade")
             return State.TRANSITION_LEVEL
@@ -479,6 +517,7 @@ class EatventureBot:
         time.sleep(config.STATE_DELAY)
         
         start_time = time.monotonic()
+        last_new_level_check = 0.0
         while time.monotonic() - start_time < config.STATS_UPGRADE_CLICK_DURATION:
             self.mouse_controller.click(
                 config.STATS_UPGRADE_POS[0],
@@ -486,6 +525,15 @@ class EatventureBot:
                 relative=True,
                 delay=config.STATS_UPGRADE_CLICK_DELAY,
             )
+            elapsed = time.monotonic() - start_time
+            if elapsed - last_new_level_check >= config.NEW_LEVEL_INTERRUPT_INTERVAL:
+                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+                if self._should_interrupt_for_new_level(
+                    screenshot=limited_screenshot,
+                    max_y=config.MAX_SEARCH_Y,
+                ):
+                    return State.TRANSITION_LEVEL
+                last_new_level_check = elapsed
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         logger.info("========== STAT UPGRADE COMPLETED ==========")
@@ -496,7 +544,10 @@ class EatventureBot:
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
-        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        )
         if found:
             logger.info("New level found, transitioning")
             return State.TRANSITION_LEVEL
@@ -518,6 +569,13 @@ class EatventureBot:
                     else:
                         self.mouse_controller.click(x, y, relative=True)
                         boxes_found += 1
+
+            if self._should_interrupt_for_new_level(
+                max_y=config.MAX_SEARCH_Y,
+                force=True,
+            ):
+                logger.info("New level detected while opening boxes")
+                return State.TRANSITION_LEVEL
         
         if boxes_found > 0:
             logger.info(f"🎁 Opened {boxes_found} boxes")
@@ -549,7 +607,10 @@ class EatventureBot:
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
-        found, confidence, x, y = self._find_new_level(limited_screenshot)
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        )
         if found:
             logger.info("New level detected before scroll")
             return State.TRANSITION_LEVEL
@@ -585,6 +646,13 @@ class EatventureBot:
     def handle_check_new_level(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         time.sleep(0.05)
+
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        if self._should_interrupt_for_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        ):
+            return State.TRANSITION_LEVEL
         
         logger.info("Clicking new level button position")
         self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
@@ -606,7 +674,10 @@ class EatventureBot:
         for attempt in range(max_attempts):
             limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
-            found, confidence, x, y = self._find_new_level(limited_screenshot)
+            found, confidence, x, y = self._detect_new_level(
+                screenshot=limited_screenshot,
+                max_y=config.MAX_SEARCH_Y,
+            )
             if found:
                 logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
                 self.mouse_controller.click(x, y, relative=True)
