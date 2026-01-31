@@ -105,7 +105,7 @@ class EatventureBot:
         self._capture_cache.clear()
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
 
-    def _detect_new_level(self, screenshot=None, max_y=None, force=False):
+    def _detect_new_level(self, screenshot=None, screenshot_gray=None, max_y=None, force=False):
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
         cached = self._new_level_cache
@@ -115,7 +115,11 @@ class EatventureBot:
         if screenshot is None:
             screenshot = self._capture(max_y=target_max_y, force=force)
 
-        result = self._find_new_level(screenshot, threshold=config.NEW_LEVEL_THRESHOLD)
+        result = self._find_new_level(
+            screenshot,
+            screenshot_gray=screenshot_gray,
+            threshold=config.NEW_LEVEL_THRESHOLD,
+        )
         self._new_level_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
@@ -129,7 +133,7 @@ class EatventureBot:
             logger.info("Priority override: new level detected, interrupting current action")
         return found
 
-    def _find_new_level(self, screenshot, threshold=None):
+    def _find_new_level(self, screenshot, screenshot_gray=None, threshold=None):
         if "newLevel" not in self.templates:
             return False, 0.0, 0, 0
 
@@ -138,6 +142,7 @@ class EatventureBot:
             screenshot,
             template,
             mask=mask,
+            screenshot_gray=screenshot_gray,
             threshold=threshold or config.NEW_LEVEL_THRESHOLD,
             template_name="newLevel",
         )
@@ -156,6 +161,7 @@ class EatventureBot:
             return False
 
         roi = screenshot[y_min:y_max, x_min:x_max]
+        roi_gray = self.image_matcher.to_gray(roi)
 
         for template_name in self.red_icon_templates:
             if template_name not in self.templates:
@@ -169,6 +175,7 @@ class EatventureBot:
                 threshold=config.STATS_RED_ICON_THRESHOLD,
                 min_distance=80,
                 template_name=template_name,
+                screenshot_gray=roi_gray,
             )
 
             if icons:
@@ -222,10 +229,13 @@ class EatventureBot:
         self.work_done = False
         
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        screenshot_gray = self.image_matcher.to_gray(screenshot)
         limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_gray = screenshot_gray[:config.MAX_SEARCH_Y, :]
 
         found, confidence, x, y = self._detect_new_level(
             screenshot=limited_screenshot,
+            screenshot_gray=limited_gray,
             max_y=config.MAX_SEARCH_Y,
         )
         if found:
@@ -246,6 +256,7 @@ class EatventureBot:
                 threshold=config.RED_ICON_THRESHOLD,
                 min_distance=80,
                 template_name=template_name,
+                screenshot_gray=screenshot_gray,
             )
             
             for conf, x, y in icons:
@@ -375,12 +386,14 @@ class EatventureBot:
     
     def handle_check_unlock(self, current_state):
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        limited_gray = self.image_matcher.to_gray(limited_screenshot)
         
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
             found, confidence, x, y = self.image_matcher.find_template(
                 limited_screenshot, template, mask=mask,
-                threshold=config.UNLOCK_THRESHOLD, template_name="unlock"
+                threshold=config.UNLOCK_THRESHOLD, template_name="unlock",
+                screenshot_gray=limited_gray,
             )
             
             if found:
@@ -398,6 +411,7 @@ class EatventureBot:
         
         for attempt in range(max_attempts):
             limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+            limited_gray = self.image_matcher.to_gray(limited_screenshot)
             
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
@@ -406,7 +420,8 @@ class EatventureBot:
                 
                 found, confidence, x, y = self.image_matcher.find_template(
                     limited_screenshot, template, mask=mask,
-                    threshold=current_threshold, template_name="upgradeStation"
+                    threshold=current_threshold, template_name="upgradeStation",
+                    screenshot_gray=limited_gray,
                 )
                 
                 if found:
@@ -462,13 +477,15 @@ class EatventureBot:
             
             if elapsed_time - last_check_time >= check_interval:
                 limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+                limited_gray = self.image_matcher.to_gray(limited_screenshot)
 
                 if "upgradeStation" in self.templates:
                     template, mask = self.templates["upgradeStation"]
                     found, confidence, found_x, found_y = self.image_matcher.find_template(
                         limited_screenshot, template, mask=mask,
                         threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
-                        check_color=config.UPGRADE_STATION_COLOR_CHECK
+                        check_color=config.UPGRADE_STATION_COLOR_CHECK,
+                        screenshot_gray=limited_gray,
                     )
                     
                     if not found and not upgrade_missing_logged:
@@ -498,10 +515,13 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
         extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        extended_gray = self.image_matcher.to_gray(extended_screenshot)
         limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
+        limited_gray = extended_gray[:config.MAX_SEARCH_Y, :]
 
         found, confidence, x, y = self._detect_new_level(
             screenshot=limited_screenshot,
+            screenshot_gray=limited_gray,
             max_y=config.MAX_SEARCH_Y,
         )
         if found:
@@ -543,9 +563,11 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        limited_gray = self.image_matcher.to_gray(limited_screenshot)
 
         found, confidence, x, y = self._detect_new_level(
             screenshot=limited_screenshot,
+            screenshot_gray=limited_gray,
             max_y=config.MAX_SEARCH_Y,
         )
         if found:
@@ -560,7 +582,8 @@ class EatventureBot:
                 template, mask = self.templates[box_name]
                 found, confidence, x, y = self.image_matcher.find_template(
                     limited_screenshot, template, mask=mask,
-                    threshold=config.BOX_THRESHOLD, template_name=box_name
+                    threshold=config.BOX_THRESHOLD, template_name=box_name,
+                    screenshot_gray=limited_gray,
                 )
                 
                 if found:
@@ -606,9 +629,11 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        limited_gray = self.image_matcher.to_gray(limited_screenshot)
 
         found, confidence, x, y = self._detect_new_level(
             screenshot=limited_screenshot,
+            screenshot_gray=limited_gray,
             max_y=config.MAX_SEARCH_Y,
         )
         if found:
@@ -651,6 +676,7 @@ class EatventureBot:
         if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
+            force=True,
         ):
             return State.TRANSITION_LEVEL
         
@@ -665,7 +691,7 @@ class EatventureBot:
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
-    
+
     def handle_transition_level(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         
@@ -673,9 +699,11 @@ class EatventureBot:
         
         for attempt in range(max_attempts):
             limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+            limited_gray = self.image_matcher.to_gray(limited_screenshot)
 
             found, confidence, x, y = self._detect_new_level(
                 screenshot=limited_screenshot,
+                screenshot_gray=limited_gray,
                 max_y=config.MAX_SEARCH_Y,
             )
             if found:
@@ -720,12 +748,14 @@ class EatventureBot:
             return State.FIND_RED_ICONS
         
         screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        screenshot_gray = self.image_matcher.to_gray(screenshot)
 
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
             found, confidence, x, y = self.image_matcher.find_template(
                 screenshot, template, mask=mask,
-                threshold=config.UNLOCK_THRESHOLD, template_name="unlock"
+                threshold=config.UNLOCK_THRESHOLD, template_name="unlock",
+                screenshot_gray=screenshot_gray,
             )
 
             if found:

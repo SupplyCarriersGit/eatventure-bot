@@ -8,6 +8,9 @@ logger = logging.getLogger(__name__)
 class ImageMatcher:
     def __init__(self, threshold=0.85):
         self.threshold = threshold
+        self._template_gray_cache = {}
+        self._scaled_template_cache = {}
+        cv2.setUseOptimized(True)
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
@@ -22,15 +25,56 @@ class ImageMatcher:
             template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
         
         return template, mask
+
+    def to_gray(self, image):
+        if image is None:
+            return None
+        if len(image.shape) == 2:
+            return image
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    def _get_template_gray(self, template):
+        key = id(template)
+        cached = self._template_gray_cache.get(key)
+        if cached is None:
+            cached = self.to_gray(template)
+            self._template_gray_cache[key] = cached
+        return cached
+
+    def _get_scaled_template(self, template, mask, scale):
+        key = (id(template), id(mask), scale)
+        cached = self._scaled_template_cache.get(key)
+        if cached:
+            return cached
+
+        if scale == 1.0:
+            scaled_template = template
+            scaled_mask = mask
+            scaled_gray = self._get_template_gray(template)
+        else:
+            scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            scaled_mask = None
+            if mask is not None:
+                scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+                scaled_mask[scaled_mask > 0] = 255
+            scaled_gray = self.to_gray(scaled_template)
+
+        cached = (scaled_template, scaled_mask, scaled_gray)
+        self._scaled_template_cache[key] = cached
+        return cached
     
-    def find_template(self, screenshot, template, mask=None, threshold=None, template_name="Unknown", check_color=False):
+    def find_template(self, screenshot, template, mask=None, threshold=None, template_name="Unknown", check_color=False, screenshot_gray=None):
         thresh = threshold if threshold else self.threshold
         
         if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
             logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
             return False, 0.0, 0, 0
-        
-        result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=mask)
+
+        if screenshot_gray is None:
+            screenshot_gray = self.to_gray(screenshot)
+        template_gray = self._get_template_gray(template)
+
+        result = cv2.matchTemplate(screenshot_gray, template_gray, cv2.TM_SQDIFF_NORMED, mask=mask)
         
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
         
@@ -91,7 +135,7 @@ class ImageMatcher:
         color_threshold = 0.7
         return avg_corr >= color_threshold
     
-    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
+    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown", screenshot_gray=None):
         thresh = threshold if threshold else self.threshold
         all_matches = []
         
@@ -102,21 +146,16 @@ class ImageMatcher:
             logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
             return []
         
+        if screenshot_gray is None:
+            screenshot_gray = self.to_gray(screenshot)
+        
         for scale in scales:
-            if scale != 1.0:
-                scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                scaled_mask = None
-                if mask is not None:
-                    scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                    scaled_mask[scaled_mask > 0] = 255
-            else:
-                scaled_template = template
-                scaled_mask = mask
+            scaled_template, scaled_mask, scaled_gray = self._get_scaled_template(template, mask, scale)
             
             if scaled_template.shape[0] > screenshot.shape[0] or scaled_template.shape[1] > screenshot.shape[1]:
                 continue
             
-            result = cv2.matchTemplate(screenshot, scaled_template, cv2.TM_SQDIFF_NORMED, mask=scaled_mask)
+            result = cv2.matchTemplate(screenshot_gray, scaled_gray, cv2.TM_SQDIFF_NORMED, mask=scaled_mask)
             
             locations = np.where(result <= (1 - thresh))
             
