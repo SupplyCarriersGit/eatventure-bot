@@ -40,7 +40,6 @@ class EatventureBot:
         self.max_scroll_count = 5
         self.work_done = False
         self.cycle_counter = 0
-        self.upgrade_station_counter = 0
         self.red_icon_processed_count = 0
         
         self.successful_red_icon_positions = []
@@ -82,16 +81,11 @@ class EatventureBot:
         if current_state in {State.TRANSITION_LEVEL, State.HOLD_UPGRADE_STATION, State.WAIT_FOR_UNLOCK}:
             return None
 
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         found, confidence, x, y = self._find_new_level(limited_screenshot)
         if found:
             logger.info("Priority override: new level detected, transitioning immediately")
             return State.TRANSITION_LEVEL
-
-        if self._has_stats_upgrade_icon(screenshot):
-            logger.info("Priority override: stats upgrade available, upgrading immediately")
-            return State.UPGRADE_STATS
 
         return None
 
@@ -461,15 +455,8 @@ class EatventureBot:
         
         self.red_icon_processed_count += 1
         
-        self.upgrade_station_counter += 1
-        logger.info(f"Upgrades: {self.upgrade_station_counter}/2")
-        
-        if self.upgrade_station_counter >= 2:
-            logger.info("✓ 2 upgrades done → Stats upgrade")
-            self.upgrade_station_counter = 0
-            return State.UPGRADE_STATS
-        
-        return State.OPEN_BOXES
+        logger.info("✓ Upgrade station complete → Stats upgrade next")
+        return State.UPGRADE_STATS
     
     def handle_upgrade_stats(self, current_state):
         logger.info("⬆ Stats upgrade starting")
