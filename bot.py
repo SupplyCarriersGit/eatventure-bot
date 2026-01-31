@@ -210,15 +210,7 @@ class EatventureBot:
     
     def handle_find_red_icons(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
-        
-        self.cycle_counter += 1
-        logger.info(f"🔄 Cycle {self.cycle_counter}/2")
-        
-        if self.cycle_counter >= 2:
-            logger.info("➡ 2 cycles done → Force scroll")
-            self.cycle_counter = 0
-            return State.SCROLL
-        
+
         self.work_done = False
         
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
@@ -423,7 +415,7 @@ class EatventureBot:
                     return State.HOLD_UPGRADE_STATION
             
             if attempt < max_attempts - 1:
-                time.sleep(0.15)
+                time.sleep(0.1)
         
         logger.info(f"✗ Upgrade station not found (failed cycles: {self.consecutive_failed_cycles + 1})")
         self.red_icon_processed_count += 1
@@ -569,13 +561,13 @@ class EatventureBot:
                     else:
                         self.mouse_controller.click(x, y, relative=True)
                         boxes_found += 1
-
-            if self._should_interrupt_for_new_level(
-                max_y=config.MAX_SEARCH_Y,
-                force=True,
-            ):
-                logger.info("New level detected while opening boxes")
-                return State.TRANSITION_LEVEL
+        
+        if self._should_interrupt_for_new_level(
+            max_y=config.MAX_SEARCH_Y,
+            force=True,
+        ):
+            logger.info("New level detected while opening boxes")
+            return State.TRANSITION_LEVEL
         
         if boxes_found > 0:
             logger.info(f"🎁 Opened {boxes_found} boxes")
@@ -656,11 +648,11 @@ class EatventureBot:
         
         logger.info("Clicking new level button position")
         self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
-        time.sleep(0.3)
+        time.sleep(0.15)
         
         logger.info("Triggering follow-up click after new level check")
         self.mouse_controller.click(166, 526, relative=True)
-        time.sleep(0.2)
+        time.sleep(0.1)
 
         self.scroll_direction = 'down'
         self.scroll_count = 0
