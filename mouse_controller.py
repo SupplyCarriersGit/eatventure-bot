@@ -84,10 +84,11 @@ class MouseController:
         win32api.SetCursorPos((int(screen_x), int(screen_y)))
         logger.info(f"Cursor moved to window position ({x}, {y})")
     
-    def click(self, x, y, relative=True, delay=None):
+    def click(self, x, y, relative=True, delay=None, wait_after=True):
         screen_pos = self._resolve_screen_position(x, y, relative=relative)
         if screen_pos is None:
-            time.sleep(self.click_delay if delay is None else delay)
+            if wait_after:
+                time.sleep(self.click_delay if delay is None else delay)
             return False
 
         screen_x, screen_y = screen_pos
@@ -95,7 +96,8 @@ class MouseController:
 
         logger.info(f"Clicked at ({screen_x}, {screen_y})")
 
-        time.sleep(self.click_delay if delay is None else delay)
+        if wait_after:
+            time.sleep(self.click_delay if delay is None else delay)
         return True
     
     def double_click(self, x, y, relative=True):
