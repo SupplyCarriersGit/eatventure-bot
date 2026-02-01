@@ -105,6 +105,11 @@ class EatventureBot:
         self._capture_cache.clear()
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
 
+    def _sleep_until(self, target_time):
+        now = time.monotonic()
+        if target_time > now:
+            time.sleep(target_time - now)
+
     def _detect_new_level(self, screenshot=None, max_y=None, force=False):
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
@@ -426,13 +431,16 @@ class EatventureBot:
         start_time = time.monotonic()
         last_check_time = 0.0
         upgrade_missing_logged = False
+        next_click_time = start_time
         
         while True:
             elapsed_time = time.monotonic() - start_time
             if elapsed_time >= max_hold_time:
                 break
             
-            self.mouse_controller.click(x, y, relative=True, delay=click_interval)
+            self._sleep_until(next_click_time)
+            self.mouse_controller.click(x, y, relative=True, wait_after=False)
+            next_click_time = max(next_click_time + click_interval, time.monotonic() + click_interval)
             
             if elapsed_time - last_check_time >= check_interval:
                 limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
@@ -492,12 +500,18 @@ class EatventureBot:
         
         start_time = time.monotonic()
         last_new_level_check = 0.0
+        next_click_time = start_time
         while time.monotonic() - start_time < config.STATS_UPGRADE_CLICK_DURATION:
+            self._sleep_until(next_click_time)
             self.mouse_controller.click(
                 config.STATS_UPGRADE_POS[0],
                 config.STATS_UPGRADE_POS[1],
                 relative=True,
-                delay=config.STATS_UPGRADE_CLICK_DELAY,
+                wait_after=False,
+            )
+            next_click_time = max(
+                next_click_time + config.STATS_UPGRADE_CLICK_DELAY,
+                time.monotonic() + config.STATS_UPGRADE_CLICK_DELAY,
             )
             elapsed = time.monotonic() - start_time
             if elapsed - last_new_level_check >= config.NEW_LEVEL_INTERRUPT_INTERVAL:
