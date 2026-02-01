@@ -422,6 +422,11 @@ class EatventureBot:
     
     def handle_hold_upgrade_station(self, current_state):
         x, y = self.upgrade_station_pos
+
+        if self.mouse_controller.is_in_forbidden_zone(x, y):
+            logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
+            self.red_icon_processed_count += 1
+            return State.OPEN_BOXES
         
         logger.info("Spamming upgrade station clicks...")
         
@@ -429,21 +434,21 @@ class EatventureBot:
         click_interval = config.UPGRADE_CLICK_INTERVAL
         check_interval = 0.2
         start_time = time.monotonic()
-        last_check_time = 0.0
         upgrade_missing_logged = False
         next_click_time = start_time
+        next_check_time = start_time + check_interval
         
         while True:
-            elapsed_time = time.monotonic() - start_time
-            if elapsed_time >= max_hold_time:
+            now = time.monotonic()
+            if now - start_time >= max_hold_time:
                 break
             
-            self._sleep_until(next_click_time)
-            self.mouse_controller.click(x, y, relative=True, wait_after=False)
-            next_click_time = max(next_click_time + click_interval, time.monotonic() + click_interval)
+            if now >= next_click_time:
+                self.mouse_controller.click(x, y, relative=True, wait_after=False)
+                next_click_time = max(next_click_time + click_interval, now + click_interval)
             
-            if elapsed_time - last_check_time >= check_interval:
-                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+            if now >= next_check_time:
+                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
                 if "upgradeStation" in self.templates:
                     template, mask = self.templates["upgradeStation"]
@@ -460,11 +465,17 @@ class EatventureBot:
                 if self._should_interrupt_for_new_level(
                     screenshot=limited_screenshot,
                     max_y=config.MAX_SEARCH_Y,
+                    force=True,
                 ):
                     return State.TRANSITION_LEVEL
-                
-                last_check_time = elapsed_time
+
+                next_check_time = max(next_check_time + check_interval, now + check_interval)
+
+            now = time.monotonic()
+            next_action_time = min(next_click_time, next_check_time, start_time + max_hold_time)
+            self._sleep_until(next_action_time)
         
+        elapsed_time = time.monotonic() - start_time
         logger.info(f"Clicking complete: max time reached ({elapsed_time:.1f}s)")
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
