@@ -75,6 +75,7 @@ class VisionOptimizer:
         self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
         self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
         self.persistence = persistence
+        self._red_icon_miss_count = 0
 
     def _ema(self, current, new_value):
         return (1 - self.alpha) * current + self.alpha * new_value
@@ -86,6 +87,26 @@ class VisionOptimizer:
         target = max(
             config.AI_RED_ICON_THRESHOLD_MIN,
             min(avg_conf - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
+        )
+        self.red_icon_threshold = self._ema(self.red_icon_threshold, target)
+        self._persist()
+
+    def update_red_icon_scan(self, confidences):
+        if not self.enabled:
+            return
+        if confidences:
+            self._red_icon_miss_count = 0
+            self.update_red_icon_confidences(confidences)
+            return
+
+        self._red_icon_miss_count += 1
+        if self._red_icon_miss_count < config.AI_RED_ICON_MISS_WINDOW:
+            return
+        self._red_icon_miss_count = 0
+
+        target = max(
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            self.red_icon_threshold - config.AI_RED_ICON_MISS_STEP,
         )
         self.red_icon_threshold = self._ema(self.red_icon_threshold, target)
         self._persist()
@@ -502,6 +523,8 @@ class EatventureBot:
             for conf, x, y in icons:
                 abs_x = x + x_min
                 abs_y = y + y_min
+                if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
+                    continue
                 self._merge_detection(
                     detections,
                     buckets,
@@ -611,7 +634,12 @@ class EatventureBot:
             )
 
             if icons:
-                best_confidence = max(best_confidence, max(conf for conf, _, _ in icons))
+                for conf, x, y in icons:
+                    abs_x = x + x_min
+                    abs_y = y + y_min
+                    if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
+                        continue
+                    best_confidence = max(best_confidence, conf)
 
         return best_confidence > 0, best_confidence
 
@@ -634,6 +662,8 @@ class EatventureBot:
 
         detections = {}
         buckets = {}
+        if max_y is not None:
+            screenshot = screenshot[:max_y, :]
         threshold = (
             self.vision_optimizer.red_icon_threshold
             if self.vision_optimizer.enabled
@@ -651,7 +681,7 @@ class EatventureBot:
             )
 
             for conf, x, y in icons:
-                if max_y is not None and y > max_y:
+                if not self._passes_red_color_gate(screenshot, x, y):
                     continue
                 self._merge_detection(
                     detections,
@@ -669,6 +699,18 @@ class EatventureBot:
                 max_conf = max(conf for _, conf in matches)
                 red_icons.append((max_conf, x, y))
         return red_icons
+
+    def _passes_red_color_gate(self, screenshot, x, y):
+        if not config.RED_ICON_COLOR_CHECK:
+            return True
+        return self.image_matcher.is_red_dominant(
+            screenshot,
+            x,
+            y,
+            size=config.RED_ICON_COLOR_SAMPLE_SIZE,
+            min_ratio=config.RED_ICON_COLOR_MIN_RATIO,
+            min_mean=config.RED_ICON_COLOR_MIN_MEAN,
+        )
 
     def _filter_forbidden_red_icons(self, red_icons):
         filtered_icons = []
@@ -732,6 +774,7 @@ class EatventureBot:
             return State.TRANSITION_LEVEL
 
         red_icons = self._detect_red_icons_in_view(limited_screenshot, max_y=config.MAX_SEARCH_Y)
+        self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in red_icons])
         if not red_icons:
             return None
 
@@ -806,7 +849,7 @@ class EatventureBot:
             max_y=config.MAX_SEARCH_Y,
         )
 
-        self.vision_optimizer.update_red_icon_confidences([conf for conf, _, _ in self.red_icons])
+        self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in self.red_icons])
 
         logger.info(
             "Red Icon Detection: %s valid icons found (min %s template matches)",

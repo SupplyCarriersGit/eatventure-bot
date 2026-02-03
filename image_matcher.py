@@ -12,6 +12,24 @@ class ImageMatcher:
         cv2.setUseOptimized(True)
         cpu_count = os.cpu_count() or 1
         cv2.setNumThreads(cpu_count)
+
+    def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
+        half = max(1, size // 2)
+        x1 = max(0, x - half)
+        y1 = max(0, y - half)
+        x2 = min(image.shape[1], x + half)
+        y2 = min(image.shape[0], y + half)
+
+        roi = image[y1:y2, x1:x2]
+        if roi.size == 0:
+            return True
+
+        b, g, r, _ = cv2.mean(roi)
+        if r < min_mean:
+            return False
+
+        dominant_ratio = max(g, b) + 1e-6
+        return (r / dominant_ratio) >= min_ratio
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
