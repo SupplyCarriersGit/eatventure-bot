@@ -110,24 +110,25 @@ class EatventureBot:
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
-        
+
+        self.forbidden_zones = [
+            (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
+             config.FORBIDDEN_ZONE_1_Y_MIN, config.FORBIDDEN_ZONE_1_Y_MAX),
+            (config.FORBIDDEN_ZONE_2_X_MIN, config.FORBIDDEN_ZONE_2_X_MAX,
+             config.FORBIDDEN_ZONE_2_Y_MIN, config.FORBIDDEN_ZONE_2_Y_MAX),
+            (config.FORBIDDEN_ZONE_3_X_MIN, config.FORBIDDEN_ZONE_3_X_MAX,
+             config.FORBIDDEN_ZONE_3_Y_MIN, config.FORBIDDEN_ZONE_3_Y_MAX),
+            (config.FORBIDDEN_ZONE_4_X_MIN, config.FORBIDDEN_ZONE_4_X_MAX,
+             config.FORBIDDEN_ZONE_4_Y_MIN, config.FORBIDDEN_ZONE_4_Y_MAX),
+            (config.FORBIDDEN_ZONE_5_X_MIN, config.FORBIDDEN_ZONE_5_X_MAX,
+             config.FORBIDDEN_ZONE_5_Y_MIN, config.FORBIDDEN_ZONE_5_Y_MAX),
+            (config.FORBIDDEN_ZONE_6_X_MIN, config.FORBIDDEN_ZONE_6_X_MAX,
+             config.FORBIDDEN_ZONE_6_Y_MIN, config.FORBIDDEN_ZONE_6_Y_MAX),
+        ]
+
         self.overlay = None
         if config.ShowForbiddenArea:
-            forbidden_zones = [
-                (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX, 
-                 config.FORBIDDEN_ZONE_1_Y_MIN, config.FORBIDDEN_ZONE_1_Y_MAX),
-                (config.FORBIDDEN_ZONE_2_X_MIN, config.FORBIDDEN_ZONE_2_X_MAX,
-                 config.FORBIDDEN_ZONE_2_Y_MIN, config.FORBIDDEN_ZONE_2_Y_MAX),
-                (config.FORBIDDEN_ZONE_3_X_MIN, config.FORBIDDEN_ZONE_3_X_MAX,
-                 config.FORBIDDEN_ZONE_3_Y_MIN, config.FORBIDDEN_ZONE_3_Y_MAX),
-                (config.FORBIDDEN_ZONE_4_X_MIN, config.FORBIDDEN_ZONE_4_X_MAX,
-                 config.FORBIDDEN_ZONE_4_Y_MIN, config.FORBIDDEN_ZONE_4_Y_MAX),
-                (config.FORBIDDEN_ZONE_5_X_MIN, config.FORBIDDEN_ZONE_5_X_MAX,
-                 config.FORBIDDEN_ZONE_5_Y_MIN, config.FORBIDDEN_ZONE_5_Y_MAX),
-                (config.FORBIDDEN_ZONE_6_X_MIN, config.FORBIDDEN_ZONE_6_X_MAX,
-                 config.FORBIDDEN_ZONE_6_Y_MIN, config.FORBIDDEN_ZONE_6_Y_MAX),
-            ]
-            self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, forbidden_zones)
+            self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
             self.overlay.start()
             logger.info("Forbidden area overlay enabled and started")
         
@@ -396,36 +397,19 @@ class EatventureBot:
                 logger.info(f"New level detected! Red icon at ({x}, {y})")
                 return State.CHECK_NEW_LEVEL
         
-        if self.red_icons:
+        if not self.red_icons:
+            logger.info("No valid red icons after scan; scrolling to search")
+            return State.SCROLL
+        else:
             filtered_icons = []
             forbidden_zone_count = 0
-            
-            for conf, x, y in self.red_icons:
-                in_forbidden = False
-                
-                if (config.FORBIDDEN_ZONE_1_X_MIN <= x <= config.FORBIDDEN_ZONE_1_X_MAX and 
-                    config.FORBIDDEN_ZONE_1_Y_MIN <= y <= config.FORBIDDEN_ZONE_1_Y_MAX):
-                    in_forbidden = True
-                    
-                elif (config.FORBIDDEN_ZONE_2_X_MIN <= x <= config.FORBIDDEN_ZONE_2_X_MAX and 
-                    config.FORBIDDEN_ZONE_2_Y_MIN <= y <= config.FORBIDDEN_ZONE_2_Y_MAX):
-                    in_forbidden = True
-                    
-                elif (config.FORBIDDEN_ZONE_3_X_MIN <= x <= config.FORBIDDEN_ZONE_3_X_MAX and 
-                    config.FORBIDDEN_ZONE_3_Y_MIN <= y <= config.FORBIDDEN_ZONE_3_Y_MAX):
-                    in_forbidden = True
-                
-                elif (config.FORBIDDEN_ZONE_4_X_MIN <= x <= config.FORBIDDEN_ZONE_4_X_MAX and 
-                    config.FORBIDDEN_ZONE_4_Y_MIN <= y <= config.FORBIDDEN_ZONE_4_Y_MAX):
-                    in_forbidden = True
-                
-                elif (config.FORBIDDEN_ZONE_5_X_MIN <= x <= config.FORBIDDEN_ZONE_5_X_MAX and 
-                    config.FORBIDDEN_ZONE_5_Y_MIN <= y <= config.FORBIDDEN_ZONE_5_Y_MAX):
-                    in_forbidden = True
+            forbidden_zones = self.forbidden_zones
 
-                elif (config.FORBIDDEN_ZONE_6_X_MIN <= x <= config.FORBIDDEN_ZONE_6_X_MAX and 
-                    config.FORBIDDEN_ZONE_6_Y_MIN <= y <= config.FORBIDDEN_ZONE_6_Y_MAX):
-                    in_forbidden = True
+            for conf, x, y in self.red_icons:
+                in_forbidden = any(
+                    zone_x_min <= x <= zone_x_max and zone_y_min <= y <= zone_y_max
+                    for zone_x_min, zone_x_max, zone_y_min, zone_y_max in forbidden_zones
+                )
                 
                 if in_forbidden:
                     forbidden_zone_count += 1
@@ -436,8 +420,8 @@ class EatventureBot:
                 logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed")
             
             if not filtered_icons:
-                logger.info("No valid red icons after filtering")
-                return State.OPEN_BOXES
+                logger.info("No valid red icons after filtering; scrolling to search")
+                return State.SCROLL
             
             def get_priority(icon):
                 conf, x, y = icon
@@ -454,8 +438,6 @@ class EatventureBot:
             self.red_icon_cycle_count = 0
             self.work_done = True
             return State.CLICK_RED_ICON
-        
-        return State.OPEN_BOXES
     
     def handle_click_red_icon(self, current_state):
         if self.current_red_icon_index >= len(self.red_icons):
