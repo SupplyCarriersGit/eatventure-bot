@@ -205,8 +205,26 @@ class EatventureBot:
 
     def _sleep_until(self, target_time):
         now = time.monotonic()
-        if target_time > now:
+        if target_time <= now:
+            return False
+
+        interval = config.NEW_LEVEL_INTERRUPT_INTERVAL
+        if interval <= 0:
             time.sleep(target_time - now)
+            return False
+
+        while now < target_time:
+            remaining = target_time - now
+            time.sleep(min(interval, remaining))
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
+                return True
+            now = time.monotonic()
+        return False
+
+    def _sleep_with_interrupt(self, duration):
+        if duration <= 0:
+            return False
+        return self._sleep_until(time.monotonic() + duration)
 
     def _detect_new_level(self, screenshot=None, max_y=None, force=False):
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
@@ -615,8 +633,8 @@ class EatventureBot:
                     return State.HOLD_UPGRADE_STATION
             
             if attempt < max_attempts - 1:
-                if retry_delay > 0:
-                    time.sleep(retry_delay)
+                if retry_delay > 0 and self._sleep_with_interrupt(retry_delay):
+                    return State.TRANSITION_LEVEL
         
         logger.info(f"✗ Upgrade station not found (failed cycles: {self.consecutive_failed_cycles + 1})")
         self.tuner.record_search_result(False)
@@ -680,7 +698,9 @@ class EatventureBot:
 
                 now = time.monotonic()
                 next_action_time = min(next_check_time, end_time)
-                self._sleep_until(next_action_time)
+                if self._sleep_until(next_action_time):
+                    interrupt_state = State.TRANSITION_LEVEL
+                    break
         finally:
             self.mouse_controller.mouse_up(x, y, relative=True)
 
@@ -689,7 +709,8 @@ class EatventureBot:
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
-            time.sleep(config.IDLE_CLICK_SETTLE_DELAY)
+            if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
+                return State.TRANSITION_LEVEL
         
         self.red_icon_processed_count += 1
         
@@ -717,13 +738,15 @@ class EatventureBot:
         
         logger.info("✓ Stats icon found, upgrading")
         self.mouse_controller.click(config.STATS_UPGRADE_BUTTON_POS[0], config.STATS_UPGRADE_BUTTON_POS[1], relative=True)
-        time.sleep(config.STATE_DELAY)
+        if self._sleep_with_interrupt(config.STATE_DELAY):
+            return State.TRANSITION_LEVEL
         
         start_time = time.monotonic()
         last_new_level_check = 0.0
         next_click_time = start_time
         while time.monotonic() - start_time < config.STATS_UPGRADE_CLICK_DURATION:
-            self._sleep_until(next_click_time)
+            if self._sleep_until(next_click_time):
+                return State.TRANSITION_LEVEL
             self.mouse_controller.click(
                 config.STATS_UPGRADE_POS[0],
                 config.STATS_UPGRADE_POS[1],
@@ -828,8 +851,11 @@ class EatventureBot:
 
         if self.no_red_icons_found:
             logger.info("No red icons found → running up/down scan scroll sequence")
-            for direction in ("up", "down"):
-                for _ in range(self.max_scroll_count):
+            for direction, count in (
+                ("up", config.NO_ICON_SCROLL_UP_COUNT),
+                ("down", config.NO_ICON_SCROLL_DOWN_COUNT),
+            ):
+                for _ in range(count):
                     state = self._scroll_and_scan_for_red_icons(direction, scroll_duration)
                     if state is not None:
                         return state
@@ -866,7 +892,8 @@ class EatventureBot:
     def handle_check_new_level(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
-            time.sleep(config.IDLE_CLICK_SETTLE_DELAY)
+            if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
+                return State.TRANSITION_LEVEL
 
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         if self._should_interrupt_for_new_level(
@@ -878,12 +905,14 @@ class EatventureBot:
         logger.info("Clicking new level button position")
         self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
         if config.NEW_LEVEL_BUTTON_DELAY > 0:
-            time.sleep(config.NEW_LEVEL_BUTTON_DELAY)
+            if self._sleep_with_interrupt(config.NEW_LEVEL_BUTTON_DELAY):
+                return State.TRANSITION_LEVEL
         
         logger.info("Triggering follow-up click after new level check")
         self.mouse_controller.click(166, 526, relative=True)
         if config.NEW_LEVEL_FOLLOWUP_DELAY > 0:
-            time.sleep(config.NEW_LEVEL_FOLLOWUP_DELAY)
+            if self._sleep_with_interrupt(config.NEW_LEVEL_FOLLOWUP_DELAY):
+                return State.TRANSITION_LEVEL
 
         self.scroll_direction = 'down'
         self.scroll_count = 0
@@ -905,7 +934,8 @@ class EatventureBot:
                 logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
                 self.mouse_controller.click(x, y, relative=True)
                 if config.TRANSITION_POST_CLICK_DELAY > 0:
-                    time.sleep(config.TRANSITION_POST_CLICK_DELAY)
+                    if self._sleep_with_interrupt(config.TRANSITION_POST_CLICK_DELAY):
+                        return State.TRANSITION_LEVEL
 
                 self.total_levels_completed += 1
 
@@ -923,7 +953,8 @@ class EatventureBot:
             
             if attempt < max_attempts - 1:
                 if config.TRANSITION_RETRY_DELAY > 0:
-                    time.sleep(config.TRANSITION_RETRY_DELAY)
+                    if self._sleep_with_interrupt(config.TRANSITION_RETRY_DELAY):
+                        return State.TRANSITION_LEVEL
         
         logger.warning("New level button not found after 5 attempts")
         self.scroll_direction = 'down'
@@ -933,7 +964,8 @@ class EatventureBot:
     def handle_wait_for_unlock(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
-            time.sleep(config.IDLE_CLICK_SETTLE_DELAY)
+            if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
+                return State.TRANSITION_LEVEL
         
         self.wait_for_unlock_attempts += 1
         logger.debug(f"Waiting for unlock button (attempt {self.wait_for_unlock_attempts}/{self.max_wait_for_unlock_attempts})")
@@ -958,7 +990,8 @@ class EatventureBot:
                 logger.info(f"Unlock button found at ({x}, {y}) after level transition")
                 self.mouse_controller.click(x, y, relative=True)
                 if config.UNLOCK_POST_CLICK_DELAY > 0:
-                    time.sleep(config.UNLOCK_POST_CLICK_DELAY)
+                    if self._sleep_with_interrupt(config.UNLOCK_POST_CLICK_DELAY):
+                        return State.TRANSITION_LEVEL
                 logger.info("Starting new level")
                 self.wait_for_unlock_attempts = 0
                 self.scroll_direction = 'down'
@@ -966,7 +999,8 @@ class EatventureBot:
                 return State.FIND_RED_ICONS
         
         if config.WAIT_UNLOCK_RETRY_DELAY > 0:
-            time.sleep(config.WAIT_UNLOCK_RETRY_DELAY)
+            if self._sleep_with_interrupt(config.WAIT_UNLOCK_RETRY_DELAY):
+                return State.TRANSITION_LEVEL
         return State.WAIT_FOR_UNLOCK
     
     def run(self):
