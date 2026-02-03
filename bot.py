@@ -69,6 +69,8 @@ class VisionOptimizer:
     def __init__(self, persistence=None):
         self.enabled = config.AI_VISION_ENABLED
         self.alpha = config.AI_VISION_ALPHA
+        self.alpha_max = config.AI_VISION_ALPHA_MAX
+        self.confidence_boost = config.AI_VISION_CONFIDENCE_BOOST
         self.red_icon_threshold = config.RED_ICON_THRESHOLD
         self.new_level_threshold = config.NEW_LEVEL_THRESHOLD
         self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
@@ -76,9 +78,20 @@ class VisionOptimizer:
         self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
         self.persistence = persistence
         self._red_icon_miss_count = 0
+        self._new_level_miss_count = 0
+        self._new_level_red_icon_miss_count = 0
+        self._upgrade_station_miss_count = 0
+        self._stats_upgrade_miss_count = 0
 
-    def _ema(self, current, new_value):
-        return (1 - self.alpha) * current + self.alpha * new_value
+    def _ema(self, current, new_value, alpha=None):
+        blend = self.alpha if alpha is None else alpha
+        return (1 - blend) * current + blend * new_value
+
+    def _adaptive_alpha(self, confidence):
+        if confidence <= 0:
+            return self.alpha
+        boost = max(0.0, min(1.0, (confidence - 0.8))) * self.confidence_boost
+        return min(self.alpha + boost, self.alpha_max)
 
     def update_red_icon_confidences(self, confidences):
         if not self.enabled or not confidences:
@@ -88,7 +101,7 @@ class VisionOptimizer:
             config.AI_RED_ICON_THRESHOLD_MIN,
             min(avg_conf - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
         )
-        self.red_icon_threshold = self._ema(self.red_icon_threshold, target)
+        self.red_icon_threshold = self._ema(self.red_icon_threshold, target, self._adaptive_alpha(avg_conf))
         self._persist()
 
     def update_red_icon_scan(self, confidences):
@@ -108,47 +121,135 @@ class VisionOptimizer:
             config.AI_RED_ICON_THRESHOLD_MIN,
             self.red_icon_threshold - config.AI_RED_ICON_MISS_STEP,
         )
-        self.red_icon_threshold = self._ema(self.red_icon_threshold, target)
+        self.red_icon_threshold = self._ema(self.red_icon_threshold, target, self.alpha_max)
         self._persist()
 
     def update_new_level_confidence(self, confidence):
         if not self.enabled or confidence <= 0:
             return
+        self._new_level_miss_count = 0
         target = max(
             config.AI_NEW_LEVEL_THRESHOLD_MIN,
             min(confidence, config.AI_NEW_LEVEL_THRESHOLD_MAX),
         )
-        self.new_level_threshold = self._ema(self.new_level_threshold, target)
+        self.new_level_threshold = self._ema(
+            self.new_level_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
         self._persist()
 
     def update_new_level_red_icon_confidence(self, confidence):
         if not self.enabled or confidence <= 0:
             return
+        self._new_level_red_icon_miss_count = 0
         target = max(
             config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
             min(confidence, config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX),
         )
-        self.new_level_red_icon_threshold = self._ema(self.new_level_red_icon_threshold, target)
+        self.new_level_red_icon_threshold = self._ema(
+            self.new_level_red_icon_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
         self._persist()
 
     def update_upgrade_station_confidence(self, confidence):
         if not self.enabled or confidence <= 0:
             return
+        self._upgrade_station_miss_count = 0
         target = max(
             config.AI_UPGRADE_STATION_THRESHOLD_MIN,
             min(confidence, config.AI_UPGRADE_STATION_THRESHOLD_MAX),
         )
-        self.upgrade_station_threshold = self._ema(self.upgrade_station_threshold, target)
+        self.upgrade_station_threshold = self._ema(
+            self.upgrade_station_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
         self._persist()
 
     def update_stats_upgrade_confidence(self, confidence):
         if not self.enabled or confidence <= 0:
             return
+        self._stats_upgrade_miss_count = 0
         target = max(
             config.AI_STATS_UPGRADE_THRESHOLD_MIN,
             min(confidence, config.AI_STATS_UPGRADE_THRESHOLD_MAX),
         )
-        self.stats_upgrade_threshold = self._ema(self.stats_upgrade_threshold, target)
+        self.stats_upgrade_threshold = self._ema(
+            self.stats_upgrade_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
+    def update_new_level_miss(self):
+        if not self.enabled:
+            return
+        self._new_level_miss_count += 1
+        if self._new_level_miss_count < config.AI_NEW_LEVEL_MISS_WINDOW:
+            return
+        self._new_level_miss_count = 0
+        target = max(
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            self.new_level_threshold - config.AI_NEW_LEVEL_MISS_STEP,
+        )
+        self.new_level_threshold = self._ema(self.new_level_threshold, target, self.alpha_max)
+        self._persist()
+
+    def update_new_level_red_icon_miss(self):
+        if not self.enabled:
+            return
+        self._new_level_red_icon_miss_count += 1
+        if self._new_level_red_icon_miss_count < config.AI_NEW_LEVEL_RED_ICON_MISS_WINDOW:
+            return
+        self._new_level_red_icon_miss_count = 0
+        target = max(
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            self.new_level_red_icon_threshold - config.AI_NEW_LEVEL_RED_ICON_MISS_STEP,
+        )
+        self.new_level_red_icon_threshold = self._ema(
+            self.new_level_red_icon_threshold,
+            target,
+            self.alpha_max,
+        )
+        self._persist()
+
+    def update_upgrade_station_miss(self):
+        if not self.enabled:
+            return
+        self._upgrade_station_miss_count += 1
+        if self._upgrade_station_miss_count < config.AI_UPGRADE_STATION_MISS_WINDOW:
+            return
+        self._upgrade_station_miss_count = 0
+        target = max(
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            self.upgrade_station_threshold - config.AI_UPGRADE_STATION_MISS_STEP,
+        )
+        self.upgrade_station_threshold = self._ema(
+            self.upgrade_station_threshold,
+            target,
+            self.alpha_max,
+        )
+        self._persist()
+
+    def update_stats_upgrade_miss(self):
+        if not self.enabled:
+            return
+        self._stats_upgrade_miss_count += 1
+        if self._stats_upgrade_miss_count < config.AI_STATS_UPGRADE_MISS_WINDOW:
+            return
+        self._stats_upgrade_miss_count = 0
+        target = max(
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            self.stats_upgrade_threshold - config.AI_STATS_UPGRADE_MISS_STEP,
+        )
+        self.stats_upgrade_threshold = self._ema(
+            self.stats_upgrade_threshold,
+            target,
+            self.alpha_max,
+        )
         self._persist()
 
     def apply_persisted_state(self, state):
@@ -473,6 +574,8 @@ class EatventureBot:
         result = self._find_new_level(screenshot, threshold=threshold)
         if result[0]:
             self.vision_optimizer.update_new_level_confidence(result[1])
+        else:
+            self.vision_optimizer.update_new_level_miss()
         self._new_level_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
@@ -545,6 +648,8 @@ class EatventureBot:
         result = best_match or (False, 0.0, 0, 0)
         if result[0]:
             self.vision_optimizer.update_new_level_red_icon_confidence(result[1])
+        else:
+            self.vision_optimizer.update_new_level_red_icon_miss()
 
         self._new_level_red_icon_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
@@ -977,6 +1082,7 @@ class EatventureBot:
                     return State.TRANSITION_LEVEL
         
         logger.info(f"✗ Upgrade station not found (failed cycles: {self.consecutive_failed_cycles + 1})")
+        self.vision_optimizer.update_upgrade_station_miss()
         self.tuner.record_search_result(False)
         self._apply_tuning()
         self.red_icon_processed_count += 1
@@ -1081,6 +1187,7 @@ class EatventureBot:
         has_stats_icon, stats_confidence = self._has_stats_upgrade_icon(extended_screenshot)
         if not has_stats_icon:
             logger.info("✗ No stats icon, skipping")
+            self.vision_optimizer.update_stats_upgrade_miss()
             return State.SCROLL
 
         self.vision_optimizer.update_stats_upgrade_confidence(stats_confidence)
