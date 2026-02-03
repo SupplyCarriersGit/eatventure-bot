@@ -78,7 +78,8 @@ class EatventureBot:
         self.state_machine.set_priority_resolver(self.resolve_priority_state)
         self.red_icon_templates = [
             "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
-            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
+            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIcon12",
+            "RedIcon13", "RedIcon14", "RedIcon15", "RedIconNoBG"
         ]
         self.templates = self.load_templates()
         self.running = False
