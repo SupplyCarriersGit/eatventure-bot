@@ -167,8 +167,16 @@ class VisionPersistence:
             return {}
         if not os.path.exists(self.path):
             return {}
-        with open(self.path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Failed to load vision state from %s: %s. Using defaults.",
+                self.path,
+                exc,
+            )
+            return {}
 
     def save(self, state):
         if not self.path:
