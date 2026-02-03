@@ -176,7 +176,9 @@ class VisionPersistence:
         now = time.monotonic()
         if self.save_interval > 0 and now - self._last_save_time < self.save_interval:
             return
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        directory = os.path.dirname(self.path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(state, handle, indent=2, sort_keys=True)
         self._last_save_time = now

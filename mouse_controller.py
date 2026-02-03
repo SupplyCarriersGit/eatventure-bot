@@ -260,7 +260,13 @@ class MouseController:
         self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
         time.sleep(config.MOUSE_MOVE_DELAY)
         
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_from_x, screen_from_y, 0, 0)
+        win32api.mouse_event(
+            win32con.MOUSEEVENTF_LEFTDOWN,
+            int(screen_from_x),
+            int(screen_from_y),
+            0,
+            0,
+        )
         time.sleep(config.MOUSE_DOWN_UP_DELAY)
         
         steps = 20
@@ -271,7 +277,13 @@ class MouseController:
             win32api.SetCursorPos((current_x, current_y))
             time.sleep(duration / steps)
         
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_to_x, screen_to_y, 0, 0)
+        win32api.mouse_event(
+            win32con.MOUSEEVENTF_LEFTUP,
+            int(screen_to_x),
+            int(screen_to_y),
+            0,
+            0,
+        )
         self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
         logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
         time.sleep(self.click_delay)
