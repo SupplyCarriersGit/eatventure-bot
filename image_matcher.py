@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 class ImageMatcher:
     def __init__(self, threshold=0.85):
         self.threshold = threshold
+        cv2.setUseOptimized(True)
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)

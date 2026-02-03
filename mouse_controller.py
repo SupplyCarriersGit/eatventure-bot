@@ -12,6 +12,8 @@ class MouseController:
     def __init__(self, hwnd, click_delay=0.1):
         self.hwnd = hwnd
         self.click_delay = click_delay
+        self._last_click_time = 0.0
+        self._last_cursor_pos = None
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         if relative:
@@ -28,12 +30,49 @@ class MouseController:
         return int(screen_x), int(screen_y)
 
     def _send_click(self, screen_x, screen_y, down_up_delay=None):
-        win32api.SetCursorPos((int(screen_x), int(screen_y)))
-        time.sleep(config.MOUSE_MOVE_DELAY)
+        if self._should_move_cursor(screen_x, screen_y):
+            self._move_cursor(screen_x, screen_y)
+
+        self._ensure_min_click_interval()
 
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
         time.sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
+        self._last_click_time = time.monotonic()
+
+    def _ensure_min_click_interval(self):
+        min_interval = getattr(config, "MIN_CLICK_INTERVAL", 0.0)
+        if min_interval <= 0:
+            return
+        now = time.monotonic()
+        wait_time = self._last_click_time + min_interval - now
+        if wait_time > 0:
+            time.sleep(wait_time)
+
+    def _should_move_cursor(self, screen_x, screen_y):
+        if self._last_cursor_pos is None:
+            return True
+        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+        dx = abs(self._last_cursor_pos[0] - screen_x)
+        dy = abs(self._last_cursor_pos[1] - screen_y)
+        return dx > tolerance or dy > tolerance
+
+    def _move_cursor(self, screen_x, screen_y):
+        target = (int(screen_x), int(screen_y))
+        retries = max(1, getattr(config, "MOUSE_MOVE_RETRIES", 1))
+        retry_delay = getattr(config, "MOUSE_MOVE_RETRY_DELAY", 0.0)
+        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+
+        for _ in range(retries):
+            win32api.SetCursorPos(target)
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+            current = win32api.GetCursorPos()
+            if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
+                break
+
+        time.sleep(config.MOUSE_MOVE_DELAY)
+        self._last_cursor_pos = target
     
     def is_in_forbidden_zone(self, x, y):
         if (y >= config.FORBIDDEN_CLICK_Y_MIN and 
@@ -87,6 +126,7 @@ class MouseController:
             screen_y = y
         
         win32api.SetCursorPos((int(screen_x), int(screen_y)))
+        self._last_cursor_pos = (int(screen_x), int(screen_y))
         logger.info(f"Cursor moved to window position ({x}, {y})")
     
     def click(self, x, y, relative=True, delay=None, wait_after=True):
@@ -150,6 +190,7 @@ class MouseController:
             screen_to_y = to_y
         
         win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
+        self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
         time.sleep(config.MOUSE_MOVE_DELAY)
         
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_from_x, screen_from_y, 0, 0)
@@ -164,5 +205,6 @@ class MouseController:
             time.sleep(duration / steps)
         
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_to_x, screen_to_y, 0, 0)
+        self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
         logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
         time.sleep(self.click_delay)
