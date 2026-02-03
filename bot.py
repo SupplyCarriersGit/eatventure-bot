@@ -2,6 +2,7 @@ import json
 import os
 import time
 import logging
+import threading
 from datetime import datetime
 
 from window_capture import WindowCapture, ForbiddenAreaOverlay
@@ -250,6 +251,11 @@ class EatventureBot:
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
         self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+        self._capture_lock = threading.Lock()
+        self._new_level_event = threading.Event()
+        self._new_level_interrupt = None
+        self._new_level_monitor_stop = threading.Event()
+        self._new_level_monitor_thread = None
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -273,6 +279,59 @@ class EatventureBot:
             logger.info("Forbidden area overlay enabled and started")
         
         logger.info("Bot initialized successfully")
+
+    def _record_new_level_interrupt(self, source, confidence, x, y):
+        self._new_level_interrupt = {
+            "source": source,
+            "confidence": confidence,
+            "x": x,
+            "y": y,
+            "timestamp": time.monotonic(),
+        }
+        self._new_level_event.set()
+        self._mark_restaurant_completed(source, confidence)
+
+    def _consume_new_level_interrupt(self):
+        if not self._new_level_event.is_set():
+            return None
+        interrupt = self._new_level_interrupt
+        self._new_level_event.clear()
+        return interrupt
+
+    def _monitor_new_level(self):
+        interval = config.NEW_LEVEL_MONITOR_INTERVAL
+        while not self._new_level_monitor_stop.is_set():
+            if self._new_level_event.is_set():
+                time.sleep(max(interval, 0.01))
+                continue
+
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+
+            red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
+                screenshot=limited_screenshot,
+                max_y=config.MAX_SEARCH_Y,
+                force=True,
+            )
+            if red_found:
+                logger.info(
+                    "Background monitor: new level red icon detected at (%s, %s)",
+                    red_x,
+                    red_y,
+                )
+                self._record_new_level_interrupt("new level red icon", red_conf, red_x, red_y)
+                time.sleep(max(interval, 0.01))
+                continue
+
+            found, confidence, x, y = self._detect_new_level(
+                screenshot=limited_screenshot,
+                max_y=config.MAX_SEARCH_Y,
+                force=True,
+            )
+            if found:
+                logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
+                self._record_new_level_interrupt("new level button", confidence, x, y)
+
+            time.sleep(max(interval, 0.01))
 
     def _apply_tuning(self):
         if not self.tuner.enabled:
@@ -316,6 +375,16 @@ class EatventureBot:
         return True
 
     def resolve_priority_state(self, current_state):
+        interrupt = self._consume_new_level_interrupt()
+        if interrupt:
+            logger.info(
+                "Priority override: background %s detected at (%s, %s), interrupting current action",
+                interrupt["source"],
+                interrupt["x"],
+                interrupt["y"],
+            )
+            return State.TRANSITION_LEVEL
+
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
@@ -334,7 +403,8 @@ class EatventureBot:
         if not force and cached and now - cached[0] <= self._capture_cache_ttl:
             return cached[1]
 
-        frame = self.window_capture.capture(max_y=max_y)
+        with self._capture_lock:
+            frame = self.window_capture.capture(max_y=max_y)
         self._capture_cache[cache_key] = (now, frame)
         return frame
 
@@ -356,6 +426,8 @@ class EatventureBot:
         while now < target_time:
             remaining = target_time - now
             time.sleep(min(interval, remaining))
+            if self._new_level_event.is_set():
+                return True
             if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return True
             now = time.monotonic()
@@ -1247,6 +1319,15 @@ class EatventureBot:
         if self.current_level_start_time is None:
             self.current_level_start_time = datetime.now()
             logger.info("Starting level timer at bot start")
+
+        if self._new_level_monitor_thread is None or not self._new_level_monitor_thread.is_alive():
+            self._new_level_monitor_stop.clear()
+            self._new_level_monitor_thread = threading.Thread(
+                target=self._monitor_new_level,
+                name="new_level_monitor",
+                daemon=True,
+            )
+            self._new_level_monitor_thread.start()
         
         try:
             while self.running:
@@ -1270,6 +1351,9 @@ class EatventureBot:
     
     def stop(self):
         self.running = False
+        self._new_level_monitor_stop.set()
+        if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
+            self._new_level_monitor_thread.join(timeout=1.0)
         if self.overlay:
             self.overlay.stop()
         logger.info("Bot stopped")
