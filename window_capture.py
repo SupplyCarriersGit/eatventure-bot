@@ -10,7 +10,14 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-ctypes.windll.shcore.SetProcessDpiAwareness(2)
+def _set_dpi_awareness():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        logger.debug("DPI awareness API unavailable; continuing without it.")
+
+
+_set_dpi_awareness()
 
 
 class WindowCapture:
@@ -60,7 +67,7 @@ class WindowCapture:
         
         x, y, width, height = self.get_window_rect()
         
-        if max_y:
+        if max_y is not None:
             height = min(height, max_y)
         
         hwndDC = win32gui.GetWindowDC(self.hwnd)
@@ -231,4 +238,3 @@ class ForbiddenAreaOverlay:
             win32gui.PostQuitMessage(0)
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
-
