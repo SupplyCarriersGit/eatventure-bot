@@ -101,7 +101,8 @@ def main():
         while not should_exit:
             if bot.running:
                 bot.step()
-            time.sleep(0.1)
+            if config.MAIN_LOOP_DELAY > 0:
+                time.sleep(config.MAIN_LOOP_DELAY)
         
         logger.info("Program exiting...")
         

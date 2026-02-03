@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -9,6 +10,8 @@ class ImageMatcher:
     def __init__(self, threshold=0.85):
         self.threshold = threshold
         cv2.setUseOptimized(True)
+        cpu_count = os.cpu_count() or 1
+        cv2.setNumThreads(cpu_count)
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
