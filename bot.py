@@ -226,6 +226,8 @@ class EatventureBot:
         
         self.total_levels_completed = 0
         self.current_level_start_time = None
+        self.completion_detected_time = None
+        self.completion_detected_by = None
         
         self.telegram = TelegramNotifier(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID, config.TELEGRAM_ENABLED)
         self.tuner = AdaptiveTuner()
@@ -450,6 +452,7 @@ class EatventureBot:
             force=force,
         )
         if found:
+            self._mark_restaurant_completed("new level button", confidence)
             logger.info("Priority override: new level detected, interrupting current action")
             return True
 
@@ -459,6 +462,7 @@ class EatventureBot:
             force=force,
         )
         if red_found:
+            self._mark_restaurant_completed("new level red icon", red_conf)
             logger.info(
                 "Priority override: new level red icon detected at (%s, %s), interrupting current action",
                 red_x,
@@ -466,6 +470,16 @@ class EatventureBot:
             )
             return True
         return False
+
+    def _mark_restaurant_completed(self, source, confidence=None):
+        if self.completion_detected_time is not None:
+            return
+        self.completion_detected_time = datetime.now()
+        self.completion_detected_by = source
+        if confidence is None:
+            logger.info("Restaurant completion detected via %s", source)
+        else:
+            logger.info("Restaurant completion detected via %s (confidence %.3f)", source, confidence)
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -725,6 +739,7 @@ class EatventureBot:
             force=True,
         )
         if red_found:
+            self._mark_restaurant_completed("new level red icon", red_conf)
             logger.info(f"New level detected! Red icon at ({red_x}, {red_y})")
             return State.CHECK_NEW_LEVEL
         
@@ -1141,6 +1156,7 @@ class EatventureBot:
                 max_y=config.MAX_SEARCH_Y,
             )
             if found:
+                self._mark_restaurant_completed("new level button", confidence)
                 logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
                 self.mouse_controller.click(x, y, relative=True)
                 if config.TRANSITION_POST_CLICK_DELAY > 0:
@@ -1151,9 +1167,12 @@ class EatventureBot:
 
                 time_spent = 0
                 if self.current_level_start_time:
-                    time_spent = (datetime.now() - self.current_level_start_time).total_seconds()
+                    completion_time = self.completion_detected_time or datetime.now()
+                    time_spent = (completion_time - self.current_level_start_time).total_seconds()
 
                 self.current_level_start_time = datetime.now()
+                self.completion_detected_time = None
+                self.completion_detected_by = None
 
                 self.telegram.notify_new_level(self.total_levels_completed, time_spent)
 
@@ -1216,6 +1235,9 @@ class EatventureBot:
     def run(self):
         self.running = True
         logger.info("Bot started - Press Ctrl+C to stop")
+        if self.current_level_start_time is None:
+            self.current_level_start_time = datetime.now()
+            logger.info("Starting level timer at bot start")
         
         try:
             while self.running:
