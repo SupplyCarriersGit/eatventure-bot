@@ -146,15 +146,14 @@ class VisionOptimizer:
     def _persist(self):
         if not self.persistence:
             return
-        self.persistence.save(
-            {
-                "red_icon_threshold": self.red_icon_threshold,
-                "new_level_threshold": self.new_level_threshold,
-                "new_level_red_icon_threshold": self.new_level_red_icon_threshold,
-                "upgrade_station_threshold": self.upgrade_station_threshold,
-                "stats_upgrade_threshold": self.stats_upgrade_threshold,
-            }
-        )
+        state = {
+            "red_icon_threshold": self.red_icon_threshold,
+            "new_level_threshold": self.new_level_threshold,
+            "new_level_red_icon_threshold": self.new_level_red_icon_threshold,
+            "upgrade_station_threshold": self.upgrade_station_threshold,
+            "stats_upgrade_threshold": self.stats_upgrade_threshold,
+        }
+        self.persistence.save({key: float(value) for key, value in state.items()})
 
 
 class VisionPersistence:
