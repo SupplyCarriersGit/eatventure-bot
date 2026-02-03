@@ -296,6 +296,123 @@ class EatventureBot:
 
         detections[(x, y)] = [(template_name, conf)]
         buckets.setdefault((bucket_x, bucket_y), []).append((x, y))
+
+    def _detect_red_icons_in_view(self, screenshot, max_y=None):
+        if not self.available_red_icon_templates:
+            return []
+
+        detections = {}
+        buckets = {}
+
+        for template_name, template, mask in self.available_red_icon_templates:
+            icons = self.image_matcher.find_all_templates(
+                screenshot,
+                template,
+                mask=mask,
+                threshold=config.RED_ICON_THRESHOLD,
+                min_distance=80,
+                template_name=template_name,
+            )
+
+            for conf, x, y in icons:
+                if max_y is not None and y > max_y:
+                    continue
+                self._merge_detection(
+                    detections,
+                    buckets,
+                    x,
+                    y,
+                    template_name,
+                    conf,
+                )
+
+        min_matches = config.RED_ICON_MIN_MATCHES
+        red_icons = []
+        for (x, y), matches in detections.items():
+            if len(matches) >= min_matches:
+                max_conf = max(conf for _, conf in matches)
+                red_icons.append((max_conf, x, y))
+        return red_icons
+
+    def _filter_forbidden_red_icons(self, red_icons):
+        filtered_icons = []
+        forbidden_zone_count = 0
+        forbidden_zones = self.forbidden_zones
+
+        for conf, x, y in red_icons:
+            in_forbidden = any(
+                zone_x_min <= x <= zone_x_max and zone_y_min <= y <= zone_y_max
+                for zone_x_min, zone_x_max, zone_y_min, zone_y_max in forbidden_zones
+            )
+
+            if in_forbidden:
+                forbidden_zone_count += 1
+            else:
+                filtered_icons.append((conf, x, y))
+
+        return filtered_icons, forbidden_zone_count
+
+    def _prioritize_red_icons(self, red_icons):
+        def get_priority(icon):
+            conf, x, y = icon
+            for success_y in self.successful_red_icon_positions:
+                if abs(y - success_y) < 50:
+                    return (0, y)
+            return (1, y)
+
+        red_icons.sort(key=get_priority)
+        return red_icons
+
+    def _scroll_and_scan_for_red_icons(self, direction, scroll_duration):
+        if direction == "up":
+            logger.info("⬆ Scroll UP (scan)")
+            self.mouse_controller.drag(
+                config.SCROLL_END_POS[0],
+                config.SCROLL_END_POS[1],
+                config.SCROLL_START_POS[0],
+                config.SCROLL_START_POS[1],
+                duration=scroll_duration,
+                relative=True,
+            )
+        else:
+            logger.info("⬇ Scroll DOWN (scan)")
+            self.mouse_controller.drag(
+                config.SCROLL_START_POS[0],
+                config.SCROLL_START_POS[1],
+                config.SCROLL_END_POS[0],
+                config.SCROLL_END_POS[1],
+                duration=scroll_duration,
+                relative=True,
+            )
+
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+
+        if self._should_interrupt_for_new_level(
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        ):
+            return State.TRANSITION_LEVEL
+
+        red_icons = self._detect_red_icons_in_view(limited_screenshot, max_y=config.MAX_SEARCH_Y)
+        if not red_icons:
+            return None
+
+        filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(red_icons)
+        if forbidden_zone_count > 0:
+            logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed during scroll")
+
+        if not filtered_icons:
+            return None
+
+        self.red_icons = self._prioritize_red_icons(filtered_icons)
+        self.current_red_icon_index = 0
+        self.red_icon_cycle_count = 0
+        self.no_red_icons_found = False
+        self.work_done = True
+        logger.info(f"✓ {len(self.red_icons)} red icons found during scroll; stopping scan")
+        return State.CLICK_RED_ICON
     
     def load_templates(self):
         required_templates = self._required_template_names()
@@ -403,21 +520,7 @@ class EatventureBot:
             self.no_red_icons_found = True
             return State.SCROLL
         else:
-            filtered_icons = []
-            forbidden_zone_count = 0
-            forbidden_zones = self.forbidden_zones
-
-            for conf, x, y in self.red_icons:
-                in_forbidden = any(
-                    zone_x_min <= x <= zone_x_max and zone_y_min <= y <= zone_y_max
-                    for zone_x_min, zone_x_max, zone_y_min, zone_y_max in forbidden_zones
-                )
-                
-                if in_forbidden:
-                    forbidden_zone_count += 1
-                else:
-                    filtered_icons.append((conf, x, y))
-            
+            filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(self.red_icons)
             if forbidden_zone_count > 0:
                 logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed")
             
@@ -426,15 +529,7 @@ class EatventureBot:
                 self.no_red_icons_found = True
                 return State.SCROLL
             
-            def get_priority(icon):
-                conf, x, y = icon
-                for success_y in self.successful_red_icon_positions:
-                    if abs(y - success_y) < 50:
-                        return (0, y)
-                return (1, y)
-            
-            filtered_icons.sort(key=get_priority)
-            self.red_icons = filtered_icons
+            self.red_icons = self._prioritize_red_icons(filtered_icons)
             
             logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
             self.current_red_icon_index = 0
@@ -543,6 +638,7 @@ class EatventureBot:
         max_hold_time = config.UPGRADE_HOLD_DURATION
         check_interval = config.UPGRADE_CHECK_INTERVAL
         start_time = time.monotonic()
+        end_time = start_time + max_hold_time
         upgrade_missing_logged = False
         next_check_time = start_time + check_interval
         interrupt_state = None
@@ -554,7 +650,7 @@ class EatventureBot:
         try:
             while True:
                 now = time.monotonic()
-                if now - start_time >= max_hold_time:
+                if now >= end_time:
                     break
 
                 if now >= next_check_time:
@@ -583,13 +679,13 @@ class EatventureBot:
                     next_check_time = max(next_check_time + check_interval, now + check_interval)
 
                 now = time.monotonic()
-                next_action_time = min(next_check_time, start_time + max_hold_time)
+                next_action_time = min(next_check_time, end_time)
                 self._sleep_until(next_action_time)
         finally:
             self.mouse_controller.mouse_up(x, y, relative=True)
 
         elapsed_time = time.monotonic() - start_time
-        logger.info(f"Clicking complete: max time reached ({elapsed_time:.1f}s)")
+        logger.info(f"Clicking complete: hold duration {elapsed_time:.1f}s")
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
@@ -729,6 +825,16 @@ class EatventureBot:
             return State.TRANSITION_LEVEL
         
         scroll_duration = config.NO_ICON_SCROLL_DURATION if self.no_red_icons_found else config.SCROLL_DURATION
+
+        if self.no_red_icons_found:
+            logger.info("No red icons found → running up/down scan scroll sequence")
+            for direction in ("up", "down"):
+                for _ in range(self.max_scroll_count):
+                    state = self._scroll_and_scan_for_red_icons(direction, scroll_duration)
+                    if state is not None:
+                        return state
+            return State.FIND_RED_ICONS
+
         if self.scroll_direction == 'up':
             logger.info(f"⬆ Scroll UP ({self.scroll_count + 1}/{self.max_scroll_count})")
             self.mouse_controller.drag(
