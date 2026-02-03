@@ -1,3 +1,5 @@
+import json
+import os
 import time
 import logging
 from datetime import datetime
@@ -62,6 +64,125 @@ class AdaptiveTuner:
             )
 
 
+class VisionOptimizer:
+    def __init__(self, persistence=None):
+        self.enabled = config.AI_VISION_ENABLED
+        self.alpha = config.AI_VISION_ALPHA
+        self.red_icon_threshold = config.RED_ICON_THRESHOLD
+        self.new_level_threshold = config.NEW_LEVEL_THRESHOLD
+        self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
+        self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
+        self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
+        self.persistence = persistence
+
+    def _ema(self, current, new_value):
+        return (1 - self.alpha) * current + self.alpha * new_value
+
+    def update_red_icon_confidences(self, confidences):
+        if not self.enabled or not confidences:
+            return
+        avg_conf = sum(confidences) / len(confidences)
+        target = max(
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            min(avg_conf - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
+        )
+        self.red_icon_threshold = self._ema(self.red_icon_threshold, target)
+        self._persist()
+
+    def update_new_level_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        target = max(
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            min(confidence, config.AI_NEW_LEVEL_THRESHOLD_MAX),
+        )
+        self.new_level_threshold = self._ema(self.new_level_threshold, target)
+        self._persist()
+
+    def update_new_level_red_icon_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        target = max(
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            min(confidence, config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX),
+        )
+        self.new_level_red_icon_threshold = self._ema(self.new_level_red_icon_threshold, target)
+        self._persist()
+
+    def update_upgrade_station_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        target = max(
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            min(confidence, config.AI_UPGRADE_STATION_THRESHOLD_MAX),
+        )
+        self.upgrade_station_threshold = self._ema(self.upgrade_station_threshold, target)
+        self._persist()
+
+    def update_stats_upgrade_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        target = max(
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            min(confidence, config.AI_STATS_UPGRADE_THRESHOLD_MAX),
+        )
+        self.stats_upgrade_threshold = self._ema(self.stats_upgrade_threshold, target)
+        self._persist()
+
+    def apply_persisted_state(self, state):
+        if not state:
+            return
+        if "red_icon_threshold" in state:
+            self.red_icon_threshold = float(state["red_icon_threshold"])
+        if "new_level_threshold" in state:
+            self.new_level_threshold = float(state["new_level_threshold"])
+        if "new_level_red_icon_threshold" in state:
+            self.new_level_red_icon_threshold = float(state["new_level_red_icon_threshold"])
+        if "upgrade_station_threshold" in state:
+            self.upgrade_station_threshold = float(state["upgrade_station_threshold"])
+        if "stats_upgrade_threshold" in state:
+            self.stats_upgrade_threshold = float(state["stats_upgrade_threshold"])
+
+    def _persist(self):
+        if not self.persistence:
+            return
+        self.persistence.save(
+            {
+                "red_icon_threshold": self.red_icon_threshold,
+                "new_level_threshold": self.new_level_threshold,
+                "new_level_red_icon_threshold": self.new_level_red_icon_threshold,
+                "upgrade_station_threshold": self.upgrade_station_threshold,
+                "stats_upgrade_threshold": self.stats_upgrade_threshold,
+            }
+        )
+
+
+class VisionPersistence:
+    def __init__(self, path, save_interval):
+        self.path = path
+        self.save_interval = save_interval
+        self._last_save_time = 0.0
+
+    def load(self):
+        if not self.path:
+            return {}
+        if not os.path.exists(self.path):
+            return {}
+        with open(self.path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def save(self, state):
+        if not self.path:
+            return
+        now = time.monotonic()
+        if self.save_interval > 0 and now - self._last_save_time < self.save_interval:
+            return
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+        self._last_save_time = now
+
+
 class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot...")
@@ -78,9 +199,11 @@ class EatventureBot:
         self.state_machine.set_priority_resolver(self.resolve_priority_state)
         self.red_icon_templates = [
             "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
-            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
+            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIcon12",
+            "RedIcon13", "RedIcon14", "RedIcon15", "RedIconNoBG"
         ]
         self.templates = self.load_templates()
+        self.available_red_icon_templates = self._build_available_red_icon_templates()
         self.running = False
         self.red_icon_cycle_count = 0
         self.red_icons = []
@@ -106,9 +229,16 @@ class EatventureBot:
         
         self.telegram = TelegramNotifier(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID, config.TELEGRAM_ENABLED)
         self.tuner = AdaptiveTuner()
+        self.vision_persistence = VisionPersistence(
+            config.AI_VISION_STATE_FILE,
+            config.AI_VISION_SAVE_INTERVAL,
+        )
+        self.vision_optimizer = VisionOptimizer(self.vision_persistence)
+        self.vision_optimizer.apply_persisted_state(self.vision_persistence.load())
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+        self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -176,11 +306,11 @@ class EatventureBot:
 
     def resolve_priority_state(self, current_state):
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        found, confidence, x, y = self._detect_new_level(
+        if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
-        )
-        if found:
+            force=True,
+        ):
             logger.info("Priority override: new level detected, transitioning immediately")
             return State.TRANSITION_LEVEL
 
@@ -200,6 +330,7 @@ class EatventureBot:
     def _clear_capture_cache(self):
         self._capture_cache.clear()
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+        self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
 
     def _sleep_until(self, target_time):
         now = time.monotonic()
@@ -234,8 +365,82 @@ class EatventureBot:
         if screenshot is None:
             screenshot = self._capture(max_y=target_max_y, force=force)
 
-        result = self._find_new_level(screenshot, threshold=config.NEW_LEVEL_THRESHOLD)
+        threshold = self.vision_optimizer.new_level_threshold if self.vision_optimizer.enabled else config.NEW_LEVEL_THRESHOLD
+        result = self._find_new_level(screenshot, threshold=threshold)
+        if result[0]:
+            self.vision_optimizer.update_new_level_confidence(result[1])
         self._new_level_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
+        return result
+
+    def _detect_new_level_red_icon(self, screenshot=None, max_y=None, force=False):
+        target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
+        now = time.monotonic()
+        cached = self._new_level_red_icon_cache
+        cache_ttl = config.NEW_LEVEL_RED_ICON_CACHE_TTL
+        if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
+            return cached["result"]
+
+        if screenshot is None:
+            screenshot = self._capture(max_y=target_max_y, force=force)
+
+        height, width = screenshot.shape[:2]
+        x_min = max(0, config.NEW_LEVEL_RED_ICON_X_MIN)
+        x_max = min(width, config.NEW_LEVEL_RED_ICON_X_MAX)
+        y_min = max(0, config.NEW_LEVEL_RED_ICON_Y_MIN)
+        y_max = min(height, config.NEW_LEVEL_RED_ICON_Y_MAX)
+
+        if x_min >= x_max or y_min >= y_max or not self.available_red_icon_templates:
+            result = (False, 0.0, 0, 0)
+            self._new_level_red_icon_cache = {
+                "timestamp": now,
+                "result": result,
+                "max_y": target_max_y,
+            }
+            return result
+
+        roi = screenshot[y_min:y_max, x_min:x_max]
+        detections = {}
+        buckets = {}
+        threshold = (
+            self.vision_optimizer.new_level_red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.NEW_LEVEL_RED_ICON_THRESHOLD
+        )
+
+        for template_name, template, mask in self.available_red_icon_templates:
+            icons = self.image_matcher.find_all_templates(
+                roi,
+                template,
+                mask=mask,
+                threshold=threshold,
+                min_distance=80,
+                template_name=template_name,
+            )
+            for conf, x, y in icons:
+                abs_x = x + x_min
+                abs_y = y + y_min
+                self._merge_detection(
+                    detections,
+                    buckets,
+                    abs_x,
+                    abs_y,
+                    template_name,
+                    conf,
+                )
+
+        min_matches = config.NEW_LEVEL_RED_ICON_MIN_MATCHES
+        best_match = None
+        for (x, y), matches in detections.items():
+            if len(matches) >= min_matches:
+                max_conf = max(conf for _, conf in matches)
+                if best_match is None or max_conf > best_match[1]:
+                    best_match = (True, max_conf, x, y)
+
+        result = best_match or (False, 0.0, 0, 0)
+        if result[0]:
+            self.vision_optimizer.update_new_level_red_icon_confidence(result[1])
+
+        self._new_level_red_icon_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
     def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False):
@@ -246,7 +451,21 @@ class EatventureBot:
         )
         if found:
             logger.info("Priority override: new level detected, interrupting current action")
-        return found
+            return True
+
+        red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
+            screenshot=screenshot,
+            max_y=max_y,
+            force=force,
+        )
+        if red_found:
+            logger.info(
+                "Priority override: new level red icon detected at (%s, %s), interrupting current action",
+                red_x,
+                red_y,
+            )
+            return True
+        return False
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -263,7 +482,7 @@ class EatventureBot:
 
     def _has_stats_upgrade_icon(self, screenshot):
         if not self.red_icon_templates:
-            return False
+            return False, 0.0
 
         height, width = screenshot.shape[:2]
         x_min = max(0, config.UPGRADE_RED_ICON_X_MIN - config.STATS_ICON_PADDING)
@@ -272,9 +491,15 @@ class EatventureBot:
         y_max = min(height, config.UPGRADE_RED_ICON_Y_MAX + config.STATS_ICON_PADDING)
 
         if x_min >= x_max or y_min >= y_max:
-            return False
+            return False, 0.0
 
         roi = screenshot[y_min:y_max, x_min:x_max]
+        threshold = (
+            self.vision_optimizer.stats_upgrade_threshold
+            if self.vision_optimizer.enabled
+            else config.STATS_RED_ICON_THRESHOLD
+        )
+        best_confidence = 0.0
 
         for template_name in self.red_icon_templates:
             if template_name not in self.templates:
@@ -285,15 +510,15 @@ class EatventureBot:
                 roi,
                 template,
                 mask=mask,
-                threshold=config.STATS_RED_ICON_THRESHOLD,
+                threshold=threshold,
                 min_distance=80,
                 template_name=template_name,
             )
 
             if icons:
-                return True
+                best_confidence = max(best_confidence, max(conf for conf, _, _ in icons))
 
-        return False
+        return best_confidence > 0, best_confidence
 
     def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=10, bucket_size=10):
         bucket_x = x // bucket_size
@@ -314,13 +539,18 @@ class EatventureBot:
 
         detections = {}
         buckets = {}
+        threshold = (
+            self.vision_optimizer.red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.RED_ICON_THRESHOLD
+        )
 
         for template_name, template, mask in self.available_red_icon_templates:
             icons = self.image_matcher.find_all_templates(
                 screenshot,
                 template,
                 mask=mask,
-                threshold=config.RED_ICON_THRESHOLD,
+                threshold=threshold,
                 min_distance=80,
                 template_name=template_name,
             )
@@ -431,6 +661,14 @@ class EatventureBot:
         scanner = AssetScanner(self.image_matcher)
         return scanner.scan(config.ASSETS_DIR, required_templates=required_templates)
 
+    def _build_available_red_icon_templates(self):
+        available = []
+        for template_name in self.red_icon_templates:
+            if template_name in self.templates:
+                template, mask = self.templates[template_name]
+                available.append((template_name, template, mask))
+        return available
+
     def _required_template_names(self):
         box_names = [f"box{i}" for i in range(1, 6)]
         required = set(self.red_icon_templates)
@@ -460,77 +698,35 @@ class EatventureBot:
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
 
-        found, confidence, x, y = self._detect_new_level(
+        if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
-        )
-        if found:
-            logger.info(f"newLevel.png found at ({x}, {y}), transitioning to new level")
+            force=True,
+        ):
+            logger.info("New level detected during scan, transitioning")
             return State.TRANSITION_LEVEL
-        
-        all_detections = {}
-        all_detections_extended = {}
-        
-        for template_name in self.red_icon_templates:
-            if template_name not in self.templates:
-                continue
-            
-            template, mask = self.templates[template_name]
-            
-            icons = self.image_matcher.find_all_templates(
-                screenshot, template, mask=mask,
-                threshold=config.RED_ICON_THRESHOLD,
-                min_distance=80,
-                template_name=template_name,
-            )
-            
-            for conf, x, y in icons:
-                found_nearby = False
-                for (px, py) in list(all_detections_extended.keys()):
-                    if abs(x - px) < 10 and abs(y - py) < 10:
-                        all_detections_extended[(px, py)].append((template_name, conf))
-                        found_nearby = True
-                        break
-                
-                if not found_nearby:
-                    all_detections_extended[(x, y)] = [(template_name, conf)]
 
-                if y <= config.MAX_SEARCH_Y:
-                    found_nearby = False
-                    for (px, py) in list(all_detections.keys()):
-                        if abs(x - px) < 10 and abs(y - py) < 10:
-                            all_detections[(px, py)].append((template_name, conf))
-                            found_nearby = True
-                            break
+        self.red_icons = self._detect_red_icons_in_view(
+            screenshot,
+            max_y=config.MAX_SEARCH_Y,
+        )
 
-                    if not found_nearby:
-                        all_detections[(x, y)] = [(template_name, conf)]
-        
-        min_matches = config.RED_ICON_MIN_MATCHES
-        total_detections = len(all_detections)
-        rejected_count = 0
-        
-        self.red_icons = []
-        for (x, y), matches in all_detections.items():
-            if len(matches) >= min_matches:
-                max_conf = max(conf for _, conf in matches)
-                self.red_icons.append((max_conf, x, y))
-            else:
-                rejected_count += 1
-        
-        all_red_icons_extended = []
-        for (x, y), matches in all_detections_extended.items():
-            if len(matches) >= min_matches:
-                max_conf = max(conf for _, conf in matches)
-                all_red_icons_extended.append((max_conf, x, y))
-        
-        logger.info(f"Red Icon Detection: {total_detections} total → {len(self.red_icons)} valid (min {min_matches} template matches), {rejected_count} rejected")
-        
-        for conf, x, y in all_red_icons_extended:
-            if (config.NEW_LEVEL_RED_ICON_X_MIN <= x <= config.NEW_LEVEL_RED_ICON_X_MAX and 
-                config.NEW_LEVEL_RED_ICON_Y_MIN <= y <= config.NEW_LEVEL_RED_ICON_Y_MAX):
-                logger.info(f"New level detected! Red icon at ({x}, {y})")
-                return State.CHECK_NEW_LEVEL
+        self.vision_optimizer.update_red_icon_confidences([conf for conf, _, _ in self.red_icons])
+
+        logger.info(
+            "Red Icon Detection: %s valid icons found (min %s template matches)",
+            len(self.red_icons),
+            config.RED_ICON_MIN_MATCHES,
+        )
+
+        red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
+            screenshot=screenshot,
+            max_y=config.MAX_SEARCH_Y,
+            force=True,
+        )
+        if red_found:
+            logger.info(f"New level detected! Red icon at ({red_x}, {red_y})")
+            return State.CHECK_NEW_LEVEL
         
         if not self.red_icons:
             logger.info("No valid red icons after scan; scrolling to search")
@@ -600,7 +796,12 @@ class EatventureBot:
     
     def handle_search_upgrade_station(self, current_state):
         max_attempts = 5
-        relaxed_threshold = config.UPGRADE_STATION_THRESHOLD - 0.05
+        base_threshold = (
+            self.vision_optimizer.upgrade_station_threshold
+            if self.vision_optimizer.enabled
+            else config.UPGRADE_STATION_THRESHOLD
+        )
+        relaxed_threshold = base_threshold - 0.05
         retry_delay = self.tuner.search_interval
         
         for attempt in range(max_attempts):
@@ -609,7 +810,7 @@ class EatventureBot:
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
                 
-                current_threshold = config.UPGRADE_STATION_THRESHOLD if attempt < 2 else relaxed_threshold
+                current_threshold = base_threshold if attempt < 2 else relaxed_threshold
                 
                 found, confidence, x, y = self.image_matcher.find_template(
                     limited_screenshot, template, mask=mask,
@@ -619,6 +820,7 @@ class EatventureBot:
                 if found:
                     logger.info(f"✓ Upgrade station found (attempt {attempt + 1})")
                     self.upgrade_station_pos = (x, y)
+                    self.vision_optimizer.update_upgrade_station_confidence(confidence)
                     
                     if self.current_red_icon_index < len(self.red_icons):
                         _, _, red_y = self.red_icons[self.current_red_icon_index]
@@ -664,6 +866,12 @@ class EatventureBot:
             self.red_icon_processed_count += 1
             return State.OPEN_BOXES
 
+        hold_threshold = (
+            self.vision_optimizer.upgrade_station_threshold
+            if self.vision_optimizer.enabled
+            else config.UPGRADE_STATION_THRESHOLD
+        )
+
         try:
             while True:
                 now = time.monotonic()
@@ -677,7 +885,7 @@ class EatventureBot:
                         template, mask = self.templates["upgradeStation"]
                         found, confidence, found_x, found_y = self.image_matcher.find_template(
                             limited_screenshot, template, mask=mask,
-                            threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
+                            threshold=hold_threshold, template_name="upgradeStation",
                             check_color=config.UPGRADE_STATION_COLOR_CHECK
                         )
 
@@ -731,9 +939,12 @@ class EatventureBot:
             logger.info("New level detected during stats upgrade")
             return State.TRANSITION_LEVEL
         
-        if not self._has_stats_upgrade_icon(extended_screenshot):
+        has_stats_icon, stats_confidence = self._has_stats_upgrade_icon(extended_screenshot)
+        if not has_stats_icon:
             logger.info("✗ No stats icon, skipping")
             return State.SCROLL
+
+        self.vision_optimizer.update_stats_upgrade_confidence(stats_confidence)
         
         logger.info("✓ Stats icon found, upgrading")
         self.mouse_controller.click(config.STATS_UPGRADE_BUTTON_POS[0], config.STATS_UPGRADE_BUTTON_POS[1], relative=True)

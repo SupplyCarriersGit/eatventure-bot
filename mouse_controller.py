@@ -94,17 +94,24 @@ class MouseController:
         check_interval = getattr(config, "MOUSE_TARGET_CHECK_INTERVAL", 0.0)
         settle_delay = getattr(config, "MOUSE_TARGET_SETTLE_DELAY", 0.0)
         hover_delay = getattr(config, "MOUSE_TARGET_HOVER_DELAY", 0.0)
+        stabilize_duration = getattr(config, "MOUSE_STABILIZE_DURATION", 0.0)
 
         start_time = time.monotonic()
+        stable_since = None
         while True:
             current = win32api.GetCursorPos()
             if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
-                if settle_delay > 0:
-                    time.sleep(settle_delay)
-                if hover_delay > 0:
-                    time.sleep(hover_delay)
-                self._last_cursor_pos = target
-                return
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                if stabilize_duration <= 0 or time.monotonic() - stable_since >= stabilize_duration:
+                    if settle_delay > 0:
+                        time.sleep(settle_delay)
+                    if hover_delay > 0:
+                        time.sleep(hover_delay)
+                    self._last_cursor_pos = target
+                    return
+            else:
+                stable_since = None
 
             if timeout <= 0 or time.monotonic() - start_time >= timeout:
                 win32api.SetCursorPos(target)
@@ -217,26 +224,22 @@ class MouseController:
     def hold_at(self, x, y, duration=None, relative=True):
         if duration is None:
             duration = config.UPGRADE_HOLD_DURATION
-        click_interval = config.UPGRADE_CLICK_INTERVAL
 
         screen_pos = self._resolve_screen_position(x, y, relative=relative)
         if screen_pos is None:
             return False
 
         screen_x, screen_y = screen_pos
-        
+
         logger.info(
-            "Spamming click at (%s, %s) every %ss for %ss",
+            "Holding click at (%s, %s) for %ss",
             screen_x,
             screen_y,
-            click_interval,
             duration,
         )
-        end_time = time.monotonic() + duration
-        while time.monotonic() < end_time:
-            self._send_click(screen_x, screen_y)
-            time.sleep(click_interval)
-        
+        self._send_mouse_down(screen_x, screen_y)
+        time.sleep(duration)
+        self._send_mouse_up(screen_x, screen_y)
         time.sleep(self.click_delay)
         return True
     
