@@ -78,11 +78,9 @@ class EatventureBot:
         self.state_machine.set_priority_resolver(self.resolve_priority_state)
         self.red_icon_templates = [
             "RedIcon", "RedIcon2", "RedIcon3", "RedIcon4", "RedIcon5", "RedIcon6",
-            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIcon12",
-            "RedIcon13", "RedIcon14", "RedIcon15", "RedIconNoBG"
+            "RedIcon7", "RedIcon8", "RedIcon9", "RedIcon10", "RedIcon11", "RedIconNoBG"
         ]
         self.templates = self.load_templates()
-        self.available_red_icon_templates = self._resolve_red_icon_templates()
         self.running = False
         self.red_icon_cycle_count = 0
         self.red_icons = []
@@ -263,17 +261,8 @@ class EatventureBot:
             template_name="newLevel",
         )
 
-    def _resolve_red_icon_templates(self):
-        resolved = []
-        for template_name in self.red_icon_templates:
-            if template_name not in self.templates:
-                continue
-            template, mask = self.templates[template_name]
-            resolved.append((template_name, template, mask))
-        return resolved
-
     def _has_stats_upgrade_icon(self, screenshot):
-        if not self.available_red_icon_templates:
+        if not self.red_icon_templates:
             return False
 
         height, width = screenshot.shape[:2]
@@ -287,7 +276,11 @@ class EatventureBot:
 
         roi = screenshot[y_min:y_max, x_min:x_max]
 
-        for template_name, template, mask in self.available_red_icon_templates:
+        for template_name in self.red_icon_templates:
+            if template_name not in self.templates:
+                continue
+
+            template, mask = self.templates[template_name]
             icons = self.image_matcher.find_all_templates(
                 roi,
                 template,
@@ -301,6 +294,7 @@ class EatventureBot:
                 return True
 
         return False
+<<<<<<< HEAD
 
     def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=10, bucket_size=10):
         bucket_x = x // bucket_size
@@ -431,6 +425,8 @@ class EatventureBot:
         self.work_done = True
         logger.info(f"✓ {len(self.red_icons)} red icons found during scroll; stopping scan")
         return State.CLICK_RED_ICON
+=======
+>>>>>>> parent of e387153 (Expand red icon templates and speed detection)
     
     def load_templates(self):
         required_templates = self._required_template_names()
@@ -476,10 +472,13 @@ class EatventureBot:
         
         all_detections = {}
         all_detections_extended = {}
-        detection_buckets = {}
-        detection_buckets_extended = {}
         
-        for template_name, template, mask in self.available_red_icon_templates:
+        for template_name in self.red_icon_templates:
+            if template_name not in self.templates:
+                continue
+            
+            template, mask = self.templates[template_name]
+            
             icons = self.image_matcher.find_all_templates(
                 screenshot, template, mask=mask,
                 threshold=config.RED_ICON_THRESHOLD,
@@ -488,24 +487,26 @@ class EatventureBot:
             )
             
             for conf, x, y in icons:
-                self._merge_detection(
-                    all_detections_extended,
-                    detection_buckets_extended,
-                    x,
-                    y,
-                    template_name,
-                    conf,
-                )
+                found_nearby = False
+                for (px, py) in list(all_detections_extended.keys()):
+                    if abs(x - px) < 10 and abs(y - py) < 10:
+                        all_detections_extended[(px, py)].append((template_name, conf))
+                        found_nearby = True
+                        break
+                
+                if not found_nearby:
+                    all_detections_extended[(x, y)] = [(template_name, conf)]
 
                 if y <= config.MAX_SEARCH_Y:
-                    self._merge_detection(
-                        all_detections,
-                        detection_buckets,
-                        x,
-                        y,
-                        template_name,
-                        conf,
-                    )
+                    found_nearby = False
+                    for (px, py) in list(all_detections.keys()):
+                        if abs(x - px) < 10 and abs(y - py) < 10:
+                            all_detections[(px, py)].append((template_name, conf))
+                            found_nearby = True
+                            break
+
+                    if not found_nearby:
+                        all_detections[(x, y)] = [(template_name, conf)]
         
         min_matches = config.RED_ICON_MIN_MATCHES
         total_detections = len(all_detections)
