@@ -102,7 +102,7 @@ MAX_SCROLL_CYCLES = 2
 # Forbidden Zones Configuration
 # These zones prevent the bot from clicking on critical UI elements
 # Each zone is defined by: X_MIN, X_MAX, Y_MIN, Y_MAX coordinates
-# You can add more zones by following the same pattern (FORBIDDEN_ZONE_6, etc.)
+# You can add more zones by following the same pattern (FORBIDDEN_ZONE_7, etc.)
 
 # General forbidden click area (botom bar)
 FORBIDDEN_CLICK_X_MIN = 60
@@ -138,3 +138,9 @@ FORBIDDEN_ZONE_5_X_MIN = 55
 FORBIDDEN_ZONE_5_X_MAX = 285
 FORBIDDEN_ZONE_5_Y_MIN = 660
 FORBIDDEN_ZONE_5_Y_MAX = 725
+
+# Zone 6: Top bar area
+FORBIDDEN_ZONE_6_X_MIN = 0
+FORBIDDEN_ZONE_6_X_MAX = 360
+FORBIDDEN_ZONE_6_Y_MIN = 0
+FORBIDDEN_ZONE_6_Y_MAX = 70

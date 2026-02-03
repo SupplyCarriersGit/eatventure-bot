@@ -173,6 +173,12 @@ FORBIDDEN_ZONE_2_X_MAX = 60
 FORBIDDEN_ZONE_2_Y_MIN = 50
 FORBIDDEN_ZONE_2_Y_MAX = 280
 
+# Zone 6: Top bar area
+FORBIDDEN_ZONE_6_X_MIN = 0
+FORBIDDEN_ZONE_6_X_MAX = 360
+FORBIDDEN_ZONE_6_Y_MIN = 0
+FORBIDDEN_ZONE_6_Y_MAX = 70
+
 # ... and more zones
 ```
 
@@ -187,10 +193,10 @@ FORBIDDEN_ZONE_2_Y_MAX = 280
 3. Note the coordinates shown in the log
 4. Add a new zone in `config.py`:
    ```python
-   FORBIDDEN_ZONE_6_X_MIN = your_x_min
-   FORBIDDEN_ZONE_6_X_MAX = your_x_max
-   FORBIDDEN_ZONE_6_Y_MIN = your_y_min
-   FORBIDDEN_ZONE_6_Y_MAX = your_y_max
+   FORBIDDEN_ZONE_7_X_MIN = your_x_min
+   FORBIDDEN_ZONE_7_X_MAX = your_x_max
+   FORBIDDEN_ZONE_7_Y_MIN = your_y_min
+   FORBIDDEN_ZONE_7_Y_MAX = your_y_max
    ```
 5. Update `mouse_controller.py` to include the new zone check
 6. Update `bot.py` to include the zone in the overlay (if using `ShowForbiddenArea`)Press **Z** to start automation
@@ -229,6 +235,11 @@ FORBIDDEN_ZONE_1_X_MIN = 290     # Right menu area
 FORBIDDEN_ZONE_1_X_MAX = 350
 FORBIDDEN_ZONE_1_Y_MIN = 93
 FORBIDDEN_ZONE_1_Y_MAX = 260
+
+FORBIDDEN_ZONE_6_X_MIN = 0       # Top bar area
+FORBIDDEN_ZONE_6_X_MAX = 360
+FORBIDDEN_ZONE_6_Y_MIN = 0
+FORBIDDEN_ZONE_6_Y_MAX = 70
 ```
 
 ## 📁 Project Structure
@@ -256,7 +267,7 @@ The main configuration file with extensive comments explaining each setting:
 - **Window Configuration**: WINDOW_TITLE and dimensions
 - **Telegram Settings**: TELEGRAM_ENABLED, bot token, and chat ID
 - **Detection Thresholds**: Template matching sensitivity
-- **Forbidden Zones**: Protected UI areas (5 zones by default, expandable)
+- **Forbidden Zones**: Protected UI areas (6 zones by default, expandable)
 - **Debug Options**: ShowForbiddenArea for visual debugging
 - **Click Positions**: All automated click coordinates
 - **Bot Behavior**: Timing, delays, and automation parameters

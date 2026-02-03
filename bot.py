@@ -71,6 +71,8 @@ class EatventureBot:
                  config.FORBIDDEN_ZONE_4_Y_MIN, config.FORBIDDEN_ZONE_4_Y_MAX),
                 (config.FORBIDDEN_ZONE_5_X_MIN, config.FORBIDDEN_ZONE_5_X_MAX,
                  config.FORBIDDEN_ZONE_5_Y_MIN, config.FORBIDDEN_ZONE_5_Y_MAX),
+                (config.FORBIDDEN_ZONE_6_X_MIN, config.FORBIDDEN_ZONE_6_X_MAX,
+                 config.FORBIDDEN_ZONE_6_Y_MIN, config.FORBIDDEN_ZONE_6_Y_MAX),
             ]
             self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, forbidden_zones)
             self.overlay.start()
@@ -311,6 +313,10 @@ class EatventureBot:
                 
                 elif (config.FORBIDDEN_ZONE_5_X_MIN <= x <= config.FORBIDDEN_ZONE_5_X_MAX and 
                     config.FORBIDDEN_ZONE_5_Y_MIN <= y <= config.FORBIDDEN_ZONE_5_Y_MAX):
+                    in_forbidden = True
+
+                elif (config.FORBIDDEN_ZONE_6_X_MIN <= x <= config.FORBIDDEN_ZONE_6_X_MAX and 
+                    config.FORBIDDEN_ZONE_6_Y_MIN <= y <= config.FORBIDDEN_ZONE_6_Y_MAX):
                     in_forbidden = True
                 
                 if in_forbidden:

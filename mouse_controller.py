@@ -65,6 +65,11 @@ class MouseController:
             config.FORBIDDEN_ZONE_5_X_MIN <= x <= config.FORBIDDEN_ZONE_5_X_MAX):
             logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_5")
             return True
+
+        if (config.FORBIDDEN_ZONE_6_Y_MIN <= y <= config.FORBIDDEN_ZONE_6_Y_MAX and
+            config.FORBIDDEN_ZONE_6_X_MIN <= x <= config.FORBIDDEN_ZONE_6_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_6")
+            return True
         
         return False
     
