@@ -805,6 +805,60 @@ class EatventureBot:
                 red_icons.append((max_conf, x, y))
         return red_icons
 
+    def _is_red_icon_present_at(self, x, y, screenshot=None):
+        if not self.available_red_icon_templates:
+            return False
+
+        target_screenshot = screenshot if screenshot is not None else self._capture(max_y=config.MAX_SEARCH_Y)
+
+        if config.RED_ICON_COLOR_CHECK:
+            if not self.image_matcher.is_red_dominant(
+                target_screenshot,
+                x,
+                y,
+                size=config.RED_ICON_COLOR_SAMPLE_SIZE,
+                min_ratio=config.RED_ICON_COLOR_MIN_RATIO,
+                min_mean=config.RED_ICON_COLOR_MIN_MEAN,
+            ):
+                return False
+
+        threshold = (
+            self.vision_optimizer.red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.RED_ICON_THRESHOLD
+        )
+
+        padding = config.RED_ICON_VERIFY_PADDING
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(target_screenshot.shape[1], x + padding)
+        y2 = min(target_screenshot.shape[0], y + padding)
+
+        roi = target_screenshot[y1:y2, x1:x2]
+        if roi.size == 0:
+            return False
+
+        for template_name, template, mask in self.available_red_icon_templates:
+            found, confidence, cx, cy = self.image_matcher.find_template(
+                roi,
+                template,
+                mask=mask,
+                threshold=threshold,
+                template_name=f"{template_name}-verify",
+            )
+            if not found:
+                continue
+
+            abs_x = cx + x1
+            abs_y = cy + y1
+            if (
+                abs(abs_x - x) <= config.RED_ICON_VERIFY_TOLERANCE
+                and abs(abs_y - y) <= config.RED_ICON_VERIFY_TOLERANCE
+            ):
+                return True
+
+        return False
+
     def _passes_red_color_gate(self, screenshot, x, y):
         if not config.RED_ICON_COLOR_CHECK:
             return True
@@ -1003,6 +1057,17 @@ class EatventureBot:
         confidence, x, y = self.red_icons[self.current_red_icon_index]
         click_x = x + config.RED_ICON_OFFSET_X
         click_y = y + config.RED_ICON_OFFSET_Y
+
+        if not self._is_red_icon_present_at(x, y):
+            logger.info(
+                "Red icon no longer present at (%s, %s); skipping click",
+                x,
+                y,
+            )
+            self.current_red_icon_index += 1
+            if self.current_red_icon_index < len(self.red_icons):
+                return State.CLICK_RED_ICON
+            return State.FIND_RED_ICONS
         
         if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
