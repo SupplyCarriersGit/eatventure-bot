@@ -19,8 +19,9 @@ class AssetScanner:
             logger.error(f"Assets directory not found: {assets_path}")
             return {}
 
-        required_set = set(required_templates or [])
-        template_files = self._collect_template_files(assets_path, required_set)
+        required_templates = required_templates or []
+        required_map = {name.lower(): name for name in required_templates}
+        template_files = self._collect_template_files(assets_path, required_map)
 
         templates = {}
         if not template_files:
@@ -45,24 +46,32 @@ class AssetScanner:
                 templates[template_name] = template_data
                 logger.info(f"Loaded template: {template_name}")
 
-        if required_set:
-            missing = sorted(required_set.difference(templates.keys()))
+        if required_map:
+            missing = sorted(
+                original for key, original in required_map.items()
+                if key not in {name.lower() for name in templates.keys()}
+            )
             if missing:
                 logger.warning(f"Missing {len(missing)} required templates: {', '.join(missing)}")
 
         return templates
 
-    def _collect_template_files(self, assets_path, required_set):
+    def _collect_template_files(self, assets_path, required_map):
         template_files = []
+        found_required = set()
         for entry in os.scandir(assets_path):
             if not entry.is_file():
                 continue
             if not entry.name.lower().endswith(".png"):
                 continue
             template_name = Path(entry.name).stem
-            if required_set and template_name not in required_set:
+            if required_map and template_name.lower() not in required_map:
                 continue
             template_files.append(Path(entry.path))
+            if required_map:
+                found_required.add(template_name.lower())
+                if len(found_required) == len(required_map):
+                    break
         return template_files
 
     def _load_template(self, template_file):
