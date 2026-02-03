@@ -12,6 +12,7 @@ class AssetScanner:
         self.image_matcher = image_matcher
         cpu_count = os.cpu_count() or 1
         self.max_workers = max_workers or min(32, cpu_count + 4)
+        self._template_cache = {}
 
     def scan(self, assets_dir, required_templates=None):
         assets_path = Path(assets_dir)
@@ -76,9 +77,20 @@ class AssetScanner:
                 if required_lookup and template_name.lower() not in required_lookup:
                     continue
                 template_files.append(Path(entry.path))
+        template_files.sort()
         return template_files
 
     def _load_template(self, template_file):
         template_name = template_file.stem
+        try:
+            mtime = template_file.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        cached = self._template_cache.get(str(template_file))
+        if cached and cached["mtime"] == mtime:
+            return template_name, cached["data"]
+
         template_img = self.image_matcher.load_template(template_file)
+        self._template_cache[str(template_file)] = {"mtime": mtime, "data": template_img}
         return template_name, template_img
