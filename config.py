@@ -10,7 +10,7 @@ MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.94
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95
 RED_ICON_MIN_MATCHES = 2
-NEW_LEVEL_RED_ICON_MIN_MATCHES = 2
+NEW_LEVEL_RED_ICON_MIN_MATCHES = 1
 STATS_RED_ICON_THRESHOLD = 0.97
 SEARCH_INTERVAL = 0.35
 CLICK_DELAY = 0.05
@@ -45,16 +45,16 @@ ShowForbiddenArea = False
 # Telegram Bot Configuration
 # TELEGRAM_ENABLED: Master switch to enable/disable all Telegram notifications
 # Set to True if you want to receive any Telegrazm messages from the bot
-TELEGRAM_ENABLED = False
+TELEGRAM_ENABLED = True
 
 # TELEGRAM_BOT_TOKEN: Your Telegram bot API token from @BotFather
 # To get one: Message @BotFather on Telegram, use /newbot command
-TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_BOT_TOKEN = "8244889019:AAFFqf1dn4d3LbHf3tenOXEBaoruj3FWkR0"
 
 # TELEGRAM_CHAT_ID: Your Telegram chat ID to receive messages
 # To get it: Message your bot, then visit: https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 # Look for "chat":{"id": YOUR_CHAT_ID in the response
-TELEGRAM_CHAT_ID = ""
+TELEGRAM_CHAT_ID = "770506304"
 
 # Game Element Detection
 MAX_SEARCH_Y = 660
