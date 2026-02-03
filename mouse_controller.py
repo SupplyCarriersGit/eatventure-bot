@@ -33,6 +33,7 @@ class MouseController:
         if self._should_move_cursor(screen_x, screen_y):
             self._move_cursor(screen_x, screen_y)
 
+        self._ensure_cursor_at_target(screen_x, screen_y)
         self._ensure_min_click_interval()
 
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
@@ -73,6 +74,35 @@ class MouseController:
 
         time.sleep(config.MOUSE_MOVE_DELAY)
         self._last_cursor_pos = target
+
+    def _ensure_cursor_at_target(self, screen_x, screen_y):
+        target = (int(screen_x), int(screen_y))
+        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+        timeout = getattr(config, "MOUSE_TARGET_TIMEOUT", 0.0)
+        check_interval = getattr(config, "MOUSE_TARGET_CHECK_INTERVAL", 0.0)
+        settle_delay = getattr(config, "MOUSE_TARGET_SETTLE_DELAY", 0.0)
+        hover_delay = getattr(config, "MOUSE_TARGET_HOVER_DELAY", 0.0)
+
+        start_time = time.monotonic()
+        while True:
+            current = win32api.GetCursorPos()
+            if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
+                if settle_delay > 0:
+                    time.sleep(settle_delay)
+                if hover_delay > 0:
+                    time.sleep(hover_delay)
+                self._last_cursor_pos = target
+                return
+
+            if timeout <= 0 or time.monotonic() - start_time >= timeout:
+                win32api.SetCursorPos(target)
+                self._last_cursor_pos = target
+                if hover_delay > 0:
+                    time.sleep(hover_delay)
+                return
+
+            if check_interval > 0:
+                time.sleep(check_interval)
     
     def is_in_forbidden_zone(self, x, y):
         if (y >= config.FORBIDDEN_CLICK_Y_MIN and 

@@ -13,6 +13,55 @@ import config
 logger = logging.getLogger(__name__)
 
 
+class AdaptiveTuner:
+    def __init__(self):
+        self.enabled = config.ADAPTIVE_TUNER_ENABLED
+        self.alpha = config.ADAPTIVE_TUNER_ALPHA
+        self.click_success_rate = 1.0
+        self.search_success_rate = 1.0
+        self.click_delay = config.CLICK_DELAY
+        self.move_delay = config.MOUSE_MOVE_DELAY
+        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
+        self.search_interval = config.UPGRADE_SEARCH_INTERVAL
+
+    def _ema(self, current, new_value):
+        return (1 - self.alpha) * current + self.alpha * new_value
+
+    def record_click_result(self, success):
+        if not self.enabled:
+            return
+        self.click_success_rate = self._ema(self.click_success_rate, 1.0 if success else 0.0)
+        self._adjust_click_timing()
+
+    def record_search_result(self, success):
+        if not self.enabled:
+            return
+        self.search_success_rate = self._ema(self.search_success_rate, 1.0 if success else 0.0)
+        self._adjust_search_timing()
+
+    def _adjust_click_timing(self):
+        if self.click_success_rate < 0.85:
+            self.click_delay = min(self.click_delay + 0.01, config.ADAPTIVE_TUNER_MAX_CLICK_DELAY)
+            self.move_delay = min(self.move_delay + 0.001, config.ADAPTIVE_TUNER_MAX_MOVE_DELAY)
+        elif self.click_success_rate > 0.97:
+            self.click_delay = max(self.click_delay - 0.005, config.ADAPTIVE_TUNER_MIN_CLICK_DELAY)
+            self.move_delay = max(self.move_delay - 0.001, config.ADAPTIVE_TUNER_MIN_MOVE_DELAY)
+
+    def _adjust_search_timing(self):
+        if self.search_success_rate < 0.7:
+            self.search_interval = min(self.search_interval + 0.01, config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL)
+            self.upgrade_click_interval = min(
+                self.upgrade_click_interval + 0.001,
+                config.ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL,
+            )
+        elif self.search_success_rate > 0.9:
+            self.search_interval = max(self.search_interval - 0.005, config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL)
+            self.upgrade_click_interval = max(
+                self.upgrade_click_interval - 0.001,
+                config.ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL,
+            )
+
+
 class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot...")
@@ -47,6 +96,7 @@ class EatventureBot:
         self.work_done = False
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
+        self.forbidden_icon_scrolls = 0
         
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
@@ -56,6 +106,7 @@ class EatventureBot:
         self.current_level_start_time = None
         
         self.telegram = TelegramNotifier(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID, config.TELEGRAM_ENABLED)
+        self.tuner = AdaptiveTuner()
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
@@ -81,6 +132,47 @@ class EatventureBot:
             logger.info("Forbidden area overlay enabled and started")
         
         logger.info("Bot initialized successfully")
+
+    def _apply_tuning(self):
+        if not self.tuner.enabled:
+            return
+        self.mouse_controller.click_delay = self.tuner.click_delay
+        config.MOUSE_MOVE_DELAY = self.tuner.move_delay
+
+    def _scroll_away_from_forbidden_zone(self, y_position):
+        if self.forbidden_icon_scrolls >= config.FORBIDDEN_ICON_MAX_SCROLLS:
+            logger.warning("Max forbidden-icon scrolls reached; skipping icon")
+            return False
+
+        if y_position >= config.FORBIDDEN_ZONE_5_Y_MIN or y_position >= config.FORBIDDEN_CLICK_Y_MIN:
+            direction = "up"
+        elif y_position <= config.FORBIDDEN_ZONE_6_Y_MAX or y_position <= config.FORBIDDEN_ZONE_4_Y_MAX:
+            direction = "down"
+        else:
+            direction = self.scroll_direction
+
+        if direction == "up":
+            logger.info("Red icon in forbidden zone → scrolling up to clear")
+            self.mouse_controller.drag(
+                config.SCROLL_END_POS[0], config.SCROLL_END_POS[1],
+                config.SCROLL_START_POS[0], config.SCROLL_START_POS[1],
+                duration=config.FORBIDDEN_ICON_SCROLL_DURATION,
+                relative=True,
+            )
+        else:
+            logger.info("Red icon in forbidden zone → scrolling down to clear")
+            self.mouse_controller.drag(
+                config.SCROLL_START_POS[0], config.SCROLL_START_POS[1],
+                config.SCROLL_END_POS[0], config.SCROLL_END_POS[1],
+                duration=config.FORBIDDEN_ICON_SCROLL_DURATION,
+                relative=True,
+            )
+
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
+            time.sleep(config.FORBIDDEN_ICON_SCROLL_COOLDOWN)
+        self.forbidden_icon_scrolls += 1
+        return True
 
     def resolve_priority_state(self, current_state):
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
@@ -232,6 +324,7 @@ class EatventureBot:
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
 
         self.work_done = False
+        self.forbidden_icon_scrolls = 0
         
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
@@ -375,11 +468,15 @@ class EatventureBot:
         
         if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
+            if self._scroll_away_from_forbidden_zone(click_y):
+                return State.FIND_RED_ICONS
             self.current_red_icon_index += 1
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
         
         logger.info(f"Clicking red icon {self.current_red_icon_index + 1}/{len(self.red_icons)} at ({click_x}, {click_y})")
-        self.mouse_controller.click(click_x, click_y, relative=True)
+        click_success = self.mouse_controller.click(click_x, click_y, relative=True)
+        self.tuner.record_click_result(click_success)
+        self._apply_tuning()
         
         self.red_icon_cycle_count = 0
         return State.CHECK_UNLOCK
@@ -406,7 +503,7 @@ class EatventureBot:
     def handle_search_upgrade_station(self, current_state):
         max_attempts = 5
         relaxed_threshold = config.UPGRADE_STATION_THRESHOLD - 0.05
-        retry_delay = config.UPGRADE_SEARCH_INTERVAL
+        retry_delay = self.tuner.search_interval
         
         for attempt in range(max_attempts):
             limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
@@ -432,6 +529,8 @@ class EatventureBot:
                     
                     self.upgrade_found_in_cycle = True
                     self.consecutive_failed_cycles = 0
+                    self.tuner.record_search_result(True)
+                    self._apply_tuning()
                     return State.HOLD_UPGRADE_STATION
             
             if attempt < max_attempts - 1:
@@ -439,6 +538,8 @@ class EatventureBot:
                     time.sleep(retry_delay)
         
         logger.info(f"✗ Upgrade station not found (failed cycles: {self.consecutive_failed_cycles + 1})")
+        self.tuner.record_search_result(False)
+        self._apply_tuning()
         self.red_icon_processed_count += 1
         self.consecutive_failed_cycles += 1
         return State.OPEN_BOXES
@@ -454,7 +555,7 @@ class EatventureBot:
         logger.info("Spamming upgrade station clicks...")
         
         max_hold_time = config.UPGRADE_HOLD_DURATION
-        click_interval = config.UPGRADE_CLICK_INTERVAL
+        click_interval = self.tuner.upgrade_click_interval
         check_interval = config.UPGRADE_CHECK_INTERVAL
         start_time = time.monotonic()
         upgrade_missing_logged = False
@@ -793,6 +894,7 @@ class EatventureBot:
 
     def step(self):
         self._clear_capture_cache()
+        self._apply_tuning()
         self.state_machine.update()
     
     def stop(self):
