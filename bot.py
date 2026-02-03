@@ -294,7 +294,6 @@ class EatventureBot:
                 return True
 
         return False
-<<<<<<< HEAD
 
     def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=10, bucket_size=10):
         bucket_x = x // bucket_size
@@ -425,8 +424,7 @@ class EatventureBot:
         self.work_done = True
         logger.info(f"✓ {len(self.red_icons)} red icons found during scroll; stopping scan")
         return State.CLICK_RED_ICON
-=======
->>>>>>> parent of e387153 (Expand red icon templates and speed detection)
+
     
     def load_templates(self):
         required_templates = self._required_template_names()
