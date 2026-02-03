@@ -41,6 +41,18 @@ class MouseController:
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         self._last_click_time = time.monotonic()
 
+    def _send_mouse_down(self, screen_x, screen_y):
+        if self._should_move_cursor(screen_x, screen_y):
+            self._move_cursor(screen_x, screen_y)
+
+        self._ensure_cursor_at_target(screen_x, screen_y)
+        self._ensure_min_click_interval()
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
+
+    def _send_mouse_up(self, screen_x, screen_y):
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
+        self._last_click_time = time.monotonic()
+
     def _ensure_min_click_interval(self):
         min_interval = getattr(config, "MIN_CLICK_INTERVAL", 0.0)
         if min_interval <= 0:
@@ -173,6 +185,28 @@ class MouseController:
 
         if wait_after:
             time.sleep(self.click_delay if delay is None else delay)
+        return True
+
+    def mouse_down(self, x, y, relative=True):
+        screen_pos = self._resolve_screen_position(x, y, relative=relative)
+        if screen_pos is None:
+            return False
+
+        screen_x, screen_y = screen_pos
+        self._send_mouse_down(screen_x, screen_y)
+        self._last_cursor_pos = (screen_x, screen_y)
+        logger.info(f"Mouse down at ({screen_x}, {screen_y})")
+        return True
+
+    def mouse_up(self, x, y, relative=True):
+        screen_pos = self._resolve_screen_position(x, y, relative=relative, check_forbidden=False)
+        if screen_pos is None:
+            return False
+
+        screen_x, screen_y = screen_pos
+        self._send_mouse_up(screen_x, screen_y)
+        self._last_cursor_pos = (screen_x, screen_y)
+        logger.info(f"Mouse up at ({screen_x}, {screen_y})")
         return True
     
     def double_click(self, x, y, relative=True):

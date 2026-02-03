@@ -101,6 +101,7 @@ class EatventureBot:
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
         self.consecutive_failed_cycles = 0
+        self.no_red_icons_found = False
         
         self.total_levels_completed = 0
         self.current_level_start_time = None
@@ -399,6 +400,7 @@ class EatventureBot:
         
         if not self.red_icons:
             logger.info("No valid red icons after scan; scrolling to search")
+            self.no_red_icons_found = True
             return State.SCROLL
         else:
             filtered_icons = []
@@ -421,6 +423,7 @@ class EatventureBot:
             
             if not filtered_icons:
                 logger.info("No valid red icons after filtering; scrolling to search")
+                self.no_red_icons_found = True
                 return State.SCROLL
             
             def get_priority(icon):
@@ -437,6 +440,7 @@ class EatventureBot:
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
             self.work_done = True
+            self.no_red_icons_found = False
             return State.CLICK_RED_ICON
     
     def handle_click_red_icon(self, current_state):
@@ -534,53 +538,56 @@ class EatventureBot:
             self.red_icon_processed_count += 1
             return State.OPEN_BOXES
         
-        logger.info("Spamming upgrade station clicks...")
-        
+        logger.info("Holding upgrade station click...")
+
         max_hold_time = config.UPGRADE_HOLD_DURATION
-        click_interval = self.tuner.upgrade_click_interval
         check_interval = config.UPGRADE_CHECK_INTERVAL
         start_time = time.monotonic()
         upgrade_missing_logged = False
-        next_click_time = start_time
         next_check_time = start_time + check_interval
-        
-        while True:
-            now = time.monotonic()
-            if now - start_time >= max_hold_time:
-                break
-            
-            if now >= next_click_time:
-                self.mouse_controller.click(x, y, relative=True, wait_after=False)
-                next_click_time = max(next_click_time + click_interval, now + click_interval)
-            
-            if now >= next_check_time:
-                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        interrupt_state = None
 
-                if "upgradeStation" in self.templates:
-                    template, mask = self.templates["upgradeStation"]
-                    found, confidence, found_x, found_y = self.image_matcher.find_template(
-                        limited_screenshot, template, mask=mask,
-                        threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
-                        check_color=config.UPGRADE_STATION_COLOR_CHECK
-                    )
-                    
-                    if not found and not upgrade_missing_logged:
-                        logger.info("Upgrade station not found while clicking; continuing until duration completes.")
-                        upgrade_missing_logged = True
+        if not self.mouse_controller.mouse_down(x, y, relative=True):
+            self.red_icon_processed_count += 1
+            return State.OPEN_BOXES
 
-                if self._should_interrupt_for_new_level(
-                    screenshot=limited_screenshot,
-                    max_y=config.MAX_SEARCH_Y,
-                    force=True,
-                ):
-                    return State.TRANSITION_LEVEL
+        try:
+            while True:
+                now = time.monotonic()
+                if now - start_time >= max_hold_time:
+                    break
 
-                next_check_time = max(next_check_time + check_interval, now + check_interval)
+                if now >= next_check_time:
+                    limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
-            now = time.monotonic()
-            next_action_time = min(next_click_time, next_check_time, start_time + max_hold_time)
-            self._sleep_until(next_action_time)
-        
+                    if "upgradeStation" in self.templates:
+                        template, mask = self.templates["upgradeStation"]
+                        found, confidence, found_x, found_y = self.image_matcher.find_template(
+                            limited_screenshot, template, mask=mask,
+                            threshold=config.UPGRADE_STATION_THRESHOLD, template_name="upgradeStation",
+                            check_color=config.UPGRADE_STATION_COLOR_CHECK
+                        )
+
+                        if not found and not upgrade_missing_logged:
+                            logger.info("Upgrade station not found while holding; continuing until duration completes.")
+                            upgrade_missing_logged = True
+
+                    if self._should_interrupt_for_new_level(
+                        screenshot=limited_screenshot,
+                        max_y=config.MAX_SEARCH_Y,
+                        force=True,
+                    ):
+                        interrupt_state = State.TRANSITION_LEVEL
+                        break
+
+                    next_check_time = max(next_check_time + check_interval, now + check_interval)
+
+                now = time.monotonic()
+                next_action_time = min(next_check_time, start_time + max_hold_time)
+                self._sleep_until(next_action_time)
+        finally:
+            self.mouse_controller.mouse_up(x, y, relative=True)
+
         elapsed_time = time.monotonic() - start_time
         logger.info(f"Clicking complete: max time reached ({elapsed_time:.1f}s)")
         
@@ -591,7 +598,7 @@ class EatventureBot:
         self.red_icon_processed_count += 1
         
         logger.info("✓ Upgrade station complete → Stats upgrade next")
-        return State.UPGRADE_STATS
+        return interrupt_state or State.UPGRADE_STATS
     
     def handle_upgrade_stats(self, current_state):
         logger.info("⬆ Stats upgrade starting")
@@ -721,19 +728,20 @@ class EatventureBot:
             logger.info("New level detected before scroll")
             return State.TRANSITION_LEVEL
         
+        scroll_duration = config.NO_ICON_SCROLL_DURATION if self.no_red_icons_found else config.SCROLL_DURATION
         if self.scroll_direction == 'up':
             logger.info(f"⬆ Scroll UP ({self.scroll_count + 1}/{self.max_scroll_count})")
             self.mouse_controller.drag(
                 config.SCROLL_END_POS[0], config.SCROLL_END_POS[1],
                 config.SCROLL_START_POS[0], config.SCROLL_START_POS[1],
-                duration=config.SCROLL_DURATION, relative=True
+                duration=scroll_duration, relative=True
             )
         else:  # down
             logger.info(f"⬇ Scroll DOWN ({self.scroll_count + 1}/{self.max_scroll_count})")
             self.mouse_controller.drag(
                 config.SCROLL_START_POS[0], config.SCROLL_START_POS[1],
                 config.SCROLL_END_POS[0], config.SCROLL_END_POS[1],
-                duration=config.SCROLL_DURATION, relative=True
+                duration=scroll_duration, relative=True
             )
         
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
