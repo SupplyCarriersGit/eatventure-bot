@@ -14,6 +14,7 @@ class MouseController:
         self.click_delay = click_delay
         self._last_click_time = 0.0
         self._last_cursor_pos = None
+        self._last_drag_time = 0.0
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         if relative:
@@ -34,6 +35,7 @@ class MouseController:
             self._move_cursor(screen_x, screen_y)
 
         self._ensure_cursor_at_target(screen_x, screen_y)
+        self._correct_cursor_position(screen_x, screen_y)
         self._ensure_min_click_interval()
 
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
@@ -46,6 +48,7 @@ class MouseController:
             self._move_cursor(screen_x, screen_y)
 
         self._ensure_cursor_at_target(screen_x, screen_y)
+        self._correct_cursor_position(screen_x, screen_y)
         self._ensure_min_click_interval()
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
 
@@ -61,6 +64,34 @@ class MouseController:
         wait_time = self._last_click_time + min_interval - now
         if wait_time > 0:
             time.sleep(wait_time)
+
+    def _ensure_min_drag_interval(self):
+        min_interval = getattr(config, "SCROLL_MIN_INTERVAL", 0.0)
+        if min_interval <= 0:
+            return
+        now = time.monotonic()
+        wait_time = self._last_drag_time + min_interval - now
+        if wait_time > 0:
+            time.sleep(wait_time)
+        self._last_drag_time = time.monotonic()
+
+    def _correct_cursor_position(self, screen_x, screen_y):
+        retries = max(0, getattr(config, "MOUSE_TARGET_RETRIES", 0))
+        if retries <= 0:
+            return
+        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+        correction_delay = getattr(config, "MOUSE_TARGET_CORRECTION_DELAY", 0.0)
+        target = (int(screen_x), int(screen_y))
+
+        for _ in range(retries):
+            current = win32api.GetCursorPos()
+            if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
+                self._last_cursor_pos = target
+                return
+            win32api.SetCursorPos(target)
+            if correction_delay > 0:
+                time.sleep(correction_delay)
+        self._last_cursor_pos = target
 
     def _should_move_cursor(self, screen_x, screen_y):
         if self._last_cursor_pos is None:
@@ -255,8 +286,12 @@ class MouseController:
             screen_from_y = from_y
             screen_to_x = to_x
             screen_to_y = to_y
+
+        self._ensure_min_drag_interval()
         
         win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
+        self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
+        self._correct_cursor_position(int(screen_from_x), int(screen_from_y))
         self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
         time.sleep(config.MOUSE_MOVE_DELAY)
         
@@ -269,13 +304,18 @@ class MouseController:
         )
         time.sleep(config.MOUSE_DOWN_UP_DELAY)
         
-        steps = 20
+        steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
+        duration = max(duration, 0.001)
+        start_time = time.monotonic()
         for i in range(steps + 1):
             t = i / steps
             current_x = int(screen_from_x + (screen_to_x - screen_from_x) * t)
             current_y = int(screen_from_y + (screen_to_y - screen_from_y) * t)
             win32api.SetCursorPos((current_x, current_y))
-            time.sleep(duration / steps)
+            target_time = start_time + (duration * t)
+            sleep_time = target_time - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
         
         win32api.mouse_event(
             win32con.MOUSEEVENTF_LEFTUP,
@@ -284,6 +324,9 @@ class MouseController:
             0,
             0,
         )
+        self._ensure_cursor_at_target(int(screen_to_x), int(screen_to_y))
+        self._correct_cursor_position(int(screen_to_x), int(screen_to_y))
         self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
         logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
-        time.sleep(self.click_delay)
+        settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
+        time.sleep(settle_delay if settle_delay > 0 else self.click_delay)

@@ -378,6 +378,7 @@ class EatventureBot:
         self._new_level_interrupt = None
         self._new_level_monitor_stop = threading.Event()
         self._new_level_monitor_thread = None
+        self._last_upgrade_station_pos = None
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -761,6 +762,46 @@ class EatventureBot:
         detections[(x, y)] = [(template_name, conf)]
         buckets.setdefault((bucket_x, bucket_y), []).append((x, y))
 
+    def _refine_template_position(
+        self,
+        template_name,
+        expected_pos,
+        search_radius,
+        screenshot=None,
+        threshold=None,
+        check_color=False,
+    ):
+        if template_name not in self.templates:
+            return expected_pos, False
+
+        if screenshot is None:
+            screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+
+        template, mask = self.templates[template_name]
+        x, y = expected_pos
+
+        x1 = max(0, x - search_radius)
+        y1 = max(0, y - search_radius)
+        x2 = min(screenshot.shape[1], x + search_radius)
+        y2 = min(screenshot.shape[0], y + search_radius)
+
+        roi = screenshot[y1:y2, x1:x2]
+        if roi.size == 0:
+            return expected_pos, False
+
+        found, confidence, rx, ry = self.image_matcher.find_template(
+            roi,
+            template,
+            mask=mask,
+            threshold=threshold,
+            template_name=f"{template_name}-refine",
+            check_color=check_color,
+        )
+        if not found:
+            return expected_pos, False
+
+        return (rx + x1, ry + y1), True
+
     def _detect_red_icons_in_view(self, screenshot, max_y=None):
         if not self.available_red_icon_templates:
             return []
@@ -1128,7 +1169,23 @@ class EatventureBot:
                 
                 if found:
                     logger.info(f"✓ Upgrade station found (attempt {attempt + 1})")
-                    self.upgrade_station_pos = (x, y)
+                    refined_pos, refined = self._refine_template_position(
+                        "upgradeStation",
+                        (x, y),
+                        config.UPGRADE_STATION_REFINE_RADIUS,
+                        screenshot=limited_screenshot,
+                        threshold=current_threshold,
+                        check_color=config.UPGRADE_STATION_COLOR_CHECK,
+                    )
+                    self.upgrade_station_pos = refined_pos
+                    if refined:
+                        logger.debug(
+                            "Refined upgrade station position: (%s, %s) -> (%s, %s)",
+                            x,
+                            y,
+                            refined_pos[0],
+                            refined_pos[1],
+                        )
                     self.vision_optimizer.update_upgrade_station_confidence(confidence)
                     
                     if self.current_red_icon_index < len(self.red_icons):
@@ -1138,6 +1195,7 @@ class EatventureBot:
                     
                     self.upgrade_found_in_cycle = True
                     self.consecutive_failed_cycles = 0
+                    self._last_upgrade_station_pos = self.upgrade_station_pos
                     self.tuner.record_search_result(True)
                     self._apply_tuning()
                     return State.HOLD_UPGRADE_STATION
@@ -1155,7 +1213,31 @@ class EatventureBot:
         return State.OPEN_BOXES
     
     def handle_hold_upgrade_station(self, current_state):
-        x, y = self.upgrade_station_pos
+        base_pos = self.upgrade_station_pos
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        hold_threshold = (
+            self.vision_optimizer.upgrade_station_threshold
+            if self.vision_optimizer.enabled
+            else config.UPGRADE_STATION_THRESHOLD
+        )
+        refined_pos, refined = self._refine_template_position(
+            "upgradeStation",
+            base_pos,
+            config.UPGRADE_STATION_REFINE_RADIUS,
+            screenshot=limited_screenshot,
+            threshold=hold_threshold,
+            check_color=config.UPGRADE_STATION_COLOR_CHECK,
+        )
+        x, y = refined_pos
+        if refined:
+            self._last_upgrade_station_pos = refined_pos
+            self.upgrade_station_pos = refined_pos
+        elif self._last_upgrade_station_pos:
+            last_x, last_y = self._last_upgrade_station_pos
+            drift_limit = config.UPGRADE_STATION_REFINE_RADIUS * 2
+            if abs(last_x - base_pos[0]) <= drift_limit and abs(last_y - base_pos[1]) <= drift_limit:
+                x, y = self._last_upgrade_station_pos
+                self.upgrade_station_pos = self._last_upgrade_station_pos
 
         if self.mouse_controller.is_in_forbidden_zone(x, y):
             logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
@@ -1175,12 +1257,6 @@ class EatventureBot:
         if not self.mouse_controller.mouse_down(x, y, relative=True):
             self.red_icon_processed_count += 1
             return State.OPEN_BOXES
-
-        hold_threshold = (
-            self.vision_optimizer.upgrade_station_threshold
-            if self.vision_optimizer.enabled
-            else config.UPGRADE_STATION_THRESHOLD
-        )
 
         try:
             while True:
