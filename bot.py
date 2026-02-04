@@ -429,14 +429,12 @@ class EatventureBot:
                 time.sleep(max(interval, 0.01))
                 continue
 
-            interrupt_max_y = self._new_level_interrupt_max_y()
-            limited_screenshot = self._capture(max_y=interrupt_max_y, force=True)
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
             red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
                 screenshot=limited_screenshot,
-                max_y=interrupt_max_y,
+                max_y=config.MAX_SEARCH_Y,
                 force=True,
-                update_miss=False,
             )
             if red_found:
                 logger.info(
@@ -450,9 +448,8 @@ class EatventureBot:
 
             found, confidence, x, y = self._detect_new_level(
                 screenshot=limited_screenshot,
-                max_y=interrupt_max_y,
+                max_y=config.MAX_SEARCH_Y,
                 force=True,
-                update_miss=False,
             )
             if found:
                 logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
@@ -513,13 +510,11 @@ class EatventureBot:
             self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
 
-        interrupt_max_y = self._new_level_interrupt_max_y()
-        limited_screenshot = self._capture(max_y=interrupt_max_y)
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
-            max_y=interrupt_max_y,
+            max_y=config.MAX_SEARCH_Y,
             force=True,
-            update_miss=False,
         ):
             logger.info("Priority override: new level detected, transitioning immediately")
             self._click_new_level_override(source="new level button")
@@ -571,9 +566,6 @@ class EatventureBot:
         self._capture_cache[cache_key] = (now, frame)
         return frame
 
-    def _new_level_interrupt_max_y(self):
-        return max(config.MAX_SEARCH_Y, config.NEW_LEVEL_RED_ICON_Y_MAX + 1)
-
     def _clear_capture_cache(self):
         self._capture_cache.clear()
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
@@ -594,11 +586,7 @@ class EatventureBot:
             time.sleep(min(interval, remaining))
             if self._new_level_event.is_set():
                 return True
-            if self._should_interrupt_for_new_level(
-                max_y=self._new_level_interrupt_max_y(),
-                force=True,
-                update_miss=False,
-            ):
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return True
             now = time.monotonic()
         return False
@@ -608,7 +596,7 @@ class EatventureBot:
             return False
         return self._sleep_until(time.monotonic() + duration)
 
-    def _detect_new_level(self, screenshot=None, max_y=None, force=False, update_miss=True):
+    def _detect_new_level(self, screenshot=None, max_y=None, force=False):
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
         cached = self._new_level_cache
@@ -622,12 +610,12 @@ class EatventureBot:
         result = self._find_new_level(screenshot, threshold=threshold)
         if result[0]:
             self.vision_optimizer.update_new_level_confidence(result[1])
-        elif update_miss:
+        else:
             self.vision_optimizer.update_new_level_miss()
         self._new_level_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
-    def _detect_new_level_red_icon(self, screenshot=None, max_y=None, force=False, update_miss=True):
+    def _detect_new_level_red_icon(self, screenshot=None, max_y=None, force=False):
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
         cached = self._new_level_red_icon_cache
@@ -663,9 +651,6 @@ class EatventureBot:
         )
 
         for template_name, template, mask in self.available_red_icon_templates:
-            template_height, template_width = template.shape[:2]
-            if template_height > roi.shape[0] or template_width > roi.shape[1]:
-                continue
             icons = self.image_matcher.find_all_templates(
                 roi,
                 template,
@@ -699,18 +684,17 @@ class EatventureBot:
         result = best_match or (False, 0.0, 0, 0)
         if result[0]:
             self.vision_optimizer.update_new_level_red_icon_confidence(result[1])
-        elif update_miss:
+        else:
             self.vision_optimizer.update_new_level_red_icon_miss()
 
         self._new_level_red_icon_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
-    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False, update_miss=True):
+    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False):
         found, confidence, x, y = self._detect_new_level(
             screenshot=screenshot,
             max_y=max_y,
             force=force,
-            update_miss=update_miss,
         )
         if found:
             self._mark_restaurant_completed("new level button", confidence)
@@ -721,7 +705,6 @@ class EatventureBot:
             screenshot=screenshot,
             max_y=max_y,
             force=force,
-            update_miss=update_miss,
         )
         if red_found:
             self._mark_restaurant_completed("new level red icon", red_conf)
@@ -1610,8 +1593,6 @@ class EatventureBot:
                         return State.TRANSITION_LEVEL
         
         logger.warning("New level button not found after 5 attempts")
-        self.completion_detected_time = None
-        self.completion_detected_by = None
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
