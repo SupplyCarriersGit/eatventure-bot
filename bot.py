@@ -542,6 +542,16 @@ class EatventureBot:
             config.NEW_LEVEL_POS[1],
             relative=True,
         )
+        logger.info(
+            "Priority override: clicking level transition position at (%s, %s)",
+            config.LEVEL_TRANSITION_POS[0],
+            config.LEVEL_TRANSITION_POS[1],
+        )
+        self.mouse_controller.click(
+            config.LEVEL_TRANSITION_POS[0],
+            config.LEVEL_TRANSITION_POS[1],
+            relative=True,
+        )
 
     def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
