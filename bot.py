@@ -384,6 +384,7 @@ class EatventureBot:
         self._new_level_monitor_stop = threading.Event()
         self._new_level_monitor_thread = None
         self._last_upgrade_station_pos = None
+        self._last_new_level_override_time = 0.0
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -514,7 +515,7 @@ class EatventureBot:
                 interrupt["x"],
                 interrupt["y"],
             )
-            self._click_new_level_override()
+            self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
 
         interrupt_max_y = self._new_level_interrupt_max_y()
@@ -526,12 +527,19 @@ class EatventureBot:
             update_miss=False,
         ):
             logger.info("Priority override: new level detected, transitioning immediately")
-            self._click_new_level_override()
+            self._click_new_level_override(source="new level button")
             return State.TRANSITION_LEVEL
 
         return None
 
-    def _click_new_level_override(self):
+    def _click_new_level_override(self, source=None):
+        now = time.monotonic()
+        cooldown = getattr(config, "NEW_LEVEL_OVERRIDE_COOLDOWN", 0.0)
+        if cooldown > 0 and now - self._last_new_level_override_time < cooldown:
+            logger.debug("Priority override: skipping click sequence due to cooldown")
+            return
+        self._last_new_level_override_time = now
+
         logger.info(
             "Priority override: clicking new level position at (%s, %s)",
             config.NEW_LEVEL_POS[0],
@@ -542,6 +550,9 @@ class EatventureBot:
             config.NEW_LEVEL_POS[1],
             relative=True,
         )
+        if source == "new level red icon":
+            logger.debug("Priority override: red icon source, skipping transition position click")
+            return
         logger.info(
             "Priority override: clicking level transition position at (%s, %s)",
             config.LEVEL_TRANSITION_POS[0],
