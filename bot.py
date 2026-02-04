@@ -79,7 +79,6 @@ class VisionOptimizer:
         self.persistence = persistence
         self._red_icon_miss_count = 0
         self._new_level_miss_count = 0
-        self._new_level_last_miss_time = 0.0
         self._new_level_red_icon_miss_count = 0
         self._upgrade_station_miss_count = 0
         self._stats_upgrade_miss_count = 0
@@ -188,10 +187,6 @@ class VisionOptimizer:
     def update_new_level_miss(self):
         if not self.enabled:
             return
-        now = time.monotonic()
-        if now - self._new_level_last_miss_time < config.AI_NEW_LEVEL_MISS_MIN_INTERVAL:
-            return
-        self._new_level_last_miss_time = now
         self._new_level_miss_count += 1
         if self._new_level_miss_count < config.AI_NEW_LEVEL_MISS_WINDOW:
             return
@@ -722,16 +717,9 @@ class EatventureBot:
             logger.info("Priority override: new level detected, interrupting current action")
             return True
 
-        red_icon_max_y = max(
-            max_y if max_y is not None else config.MAX_SEARCH_Y,
-            config.NEW_LEVEL_RED_ICON_Y_MAX + 1,
-        )
-        red_icon_screenshot = screenshot
-        if red_icon_screenshot is not None and red_icon_screenshot.shape[0] < red_icon_max_y:
-            red_icon_screenshot = None
         red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
-            screenshot=red_icon_screenshot,
-            max_y=red_icon_max_y,
+            screenshot=screenshot,
+            max_y=max_y,
             force=force,
             update_miss=update_miss,
         )
@@ -754,14 +742,6 @@ class EatventureBot:
             logger.info("Restaurant completion detected via %s", source)
         else:
             logger.info("Restaurant completion detected via %s (confidence %.3f)", source, confidence)
-
-    def _reset_completion_detection(self, reason=None):
-        if self.completion_detected_time is None and self.completion_detected_by is None:
-            return
-        self.completion_detected_time = None
-        self.completion_detected_by = None
-        if reason:
-            logger.info("Reset completion detection (%s)", reason)
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -1615,7 +1595,8 @@ class EatventureBot:
                     time_spent = (completion_time - self.current_level_start_time).total_seconds()
 
                 self.current_level_start_time = datetime.now()
-                self._reset_completion_detection("transition success")
+                self.completion_detected_time = None
+                self.completion_detected_by = None
 
                 self.telegram.notify_new_level(self.total_levels_completed, time_spent)
 
@@ -1629,7 +1610,8 @@ class EatventureBot:
                         return State.TRANSITION_LEVEL
         
         logger.warning("New level button not found after 5 attempts")
-        self._reset_completion_detection("transition failed")
+        self.completion_detected_time = None
+        self.completion_detected_by = None
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
