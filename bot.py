@@ -511,13 +511,20 @@ class EatventureBot:
             return State.TRANSITION_LEVEL
 
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        if self._should_interrupt_for_new_level(
+        priority_hit = self._detect_new_level_priority(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
             force=True,
-        ):
-            logger.info("Priority override: new level detected, transitioning immediately")
-            self._click_new_level_override(source="new level button")
+        )
+        if priority_hit:
+            source, confidence, x, y = priority_hit
+            logger.info(
+                "Priority override: %s detected at (%s, %s), transitioning immediately",
+                source,
+                x,
+                y,
+            )
+            self._click_new_level_override(source=source)
             return State.TRANSITION_LEVEL
 
         return None
@@ -690,17 +697,7 @@ class EatventureBot:
         self._new_level_red_icon_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
-    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False):
-        found, confidence, x, y = self._detect_new_level(
-            screenshot=screenshot,
-            max_y=max_y,
-            force=force,
-        )
-        if found:
-            self._mark_restaurant_completed("new level button", confidence)
-            logger.info("Priority override: new level detected, interrupting current action")
-            return True
-
+    def _detect_new_level_priority(self, screenshot=None, max_y=None, force=False):
         red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
             screenshot=screenshot,
             max_y=max_y,
@@ -708,11 +705,35 @@ class EatventureBot:
         )
         if red_found:
             self._mark_restaurant_completed("new level red icon", red_conf)
-            logger.info(
-                "Priority override: new level red icon detected at (%s, %s), interrupting current action",
-                red_x,
-                red_y,
-            )
+            return "new level red icon", red_conf, red_x, red_y
+
+        found, confidence, x, y = self._detect_new_level(
+            screenshot=screenshot,
+            max_y=max_y,
+            force=force,
+        )
+        if found:
+            self._mark_restaurant_completed("new level button", confidence)
+            return "new level button", confidence, x, y
+
+        return None
+
+    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False):
+        priority_hit = self._detect_new_level_priority(
+            screenshot=screenshot,
+            max_y=max_y,
+            force=force,
+        )
+        if priority_hit:
+            source, confidence, x, y = priority_hit
+            if source == "new level red icon":
+                logger.info(
+                    "Priority override: new level red icon detected at (%s, %s), interrupting current action",
+                    x,
+                    y,
+                )
+            else:
+                logger.info("Priority override: new level detected, interrupting current action")
             return True
         return False
 
@@ -836,6 +857,63 @@ class EatventureBot:
             return expected_pos, False
 
         return (rx + x1, ry + y1), True
+
+    def _refine_red_icon_position(self, x, y, screenshot=None):
+        if not self.available_red_icon_templates:
+            return (x, y), False, 0.0
+
+        if screenshot is None:
+            screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+
+        search_radius = config.RED_ICON_REFINE_RADIUS
+        x1 = max(0, x - search_radius)
+        y1 = max(0, y - search_radius)
+        x2 = min(screenshot.shape[1], x + search_radius)
+        y2 = min(screenshot.shape[0], y + search_radius)
+
+        roi = screenshot[y1:y2, x1:x2]
+        if roi.size == 0:
+            return (x, y), False, 0.0
+
+        base_threshold = (
+            self.vision_optimizer.red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.RED_ICON_THRESHOLD
+        )
+        threshold = max(0.0, base_threshold - config.RED_ICON_REFINE_THRESHOLD_DROP)
+        best_match = None
+
+        for template_name, template, mask in self.available_red_icon_templates:
+            found, confidence, rx, ry = self.image_matcher.find_template(
+                roi,
+                template,
+                mask=mask,
+                threshold=threshold,
+                template_name=f"{template_name}-refine",
+            )
+            if not found:
+                continue
+            abs_x = rx + x1
+            abs_y = ry + y1
+            if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
+                continue
+            if best_match is None or confidence > best_match[2]:
+                best_match = (abs_x, abs_y, confidence)
+
+        if best_match:
+            return (best_match[0], best_match[1]), True, best_match[2]
+        return (x, y), False, 0.0
+
+    def _refine_upgrade_station_click_target(self, expected_pos, screenshot=None, threshold=None):
+        refined_pos, refined = self._refine_template_position(
+            "upgradeStation",
+            expected_pos,
+            config.UPGRADE_STATION_CLICK_REFINE_RADIUS,
+            screenshot=screenshot,
+            threshold=threshold,
+            check_color=config.UPGRADE_STATION_COLOR_CHECK,
+        )
+        return refined_pos, refined
 
     def _detect_red_icons_in_view(self, screenshot, max_y=None):
         if not self.available_red_icon_templates:
@@ -1131,10 +1209,8 @@ class EatventureBot:
             return State.OPEN_BOXES
         
         confidence, x, y = self.red_icons[self.current_red_icon_index]
-        click_x = x + config.RED_ICON_OFFSET_X
-        click_y = y + config.RED_ICON_OFFSET_Y
-
-        if not self._is_red_icon_present_at(x, y):
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        if not self._is_red_icon_present_at(x, y, screenshot=limited_screenshot):
             logger.info(
                 "Red icon no longer present at (%s, %s); skipping click",
                 x,
@@ -1144,6 +1220,18 @@ class EatventureBot:
             if self.current_red_icon_index < len(self.red_icons):
                 return State.CLICK_RED_ICON
             return State.FIND_RED_ICONS
+
+        refined_pos, refined, refined_conf = self._refine_red_icon_position(
+            x,
+            y,
+            screenshot=limited_screenshot,
+        )
+        if refined:
+            x, y = refined_pos
+            self.vision_optimizer.update_red_icon_confidences([refined_conf])
+
+        click_x = x + config.RED_ICON_OFFSET_X
+        click_y = y + config.RED_ICON_OFFSET_Y
         
         if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
@@ -1273,6 +1361,16 @@ class EatventureBot:
             if abs(last_x - base_pos[0]) <= drift_limit and abs(last_y - base_pos[1]) <= drift_limit:
                 x, y = self._last_upgrade_station_pos
                 self.upgrade_station_pos = self._last_upgrade_station_pos
+
+        click_refined_pos, click_refined = self._refine_upgrade_station_click_target(
+            (x, y),
+            screenshot=limited_screenshot,
+            threshold=hold_threshold,
+        )
+        if click_refined:
+            x, y = click_refined_pos
+            self._last_upgrade_station_pos = click_refined_pos
+            self.upgrade_station_pos = click_refined_pos
 
         if self.mouse_controller.is_in_forbidden_zone(x, y):
             logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
