@@ -12,6 +12,18 @@ class ImageMatcher:
         cv2.setUseOptimized(True)
         cpu_count = os.cpu_count() or 1
         cv2.setNumThreads(cpu_count)
+        self._oversize_log = set()
+
+    def _log_oversize_template(self, template, screenshot, template_name):
+        key = (template_name, template.shape[:2], screenshot.shape[:2])
+        if key in self._oversize_log:
+            return
+        self._oversize_log.add(key)
+        logger.debug(
+            "Template is larger than screenshot. Template: %s, Screenshot: %s",
+            template.shape,
+            screenshot.shape,
+        )
 
     def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
         half = max(1, size // 2)
@@ -49,7 +61,7 @@ class ImageMatcher:
         thresh = threshold if threshold else self.threshold
         
         if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
-            logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
+            self._log_oversize_template(template, screenshot, template_name)
             return False, 0.0, 0, 0
         
         result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=mask)
@@ -121,7 +133,7 @@ class ImageMatcher:
             scales = [1.0]
         
         if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
-            logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
+            self._log_oversize_template(template, screenshot, template_name)
             return []
         
         for scale in scales:
