@@ -1231,11 +1231,13 @@ class EatventureBot:
         x, y = refined_pos
         if refined:
             self._last_upgrade_station_pos = refined_pos
+            self.upgrade_station_pos = refined_pos
         elif self._last_upgrade_station_pos:
             last_x, last_y = self._last_upgrade_station_pos
             drift_limit = config.UPGRADE_STATION_REFINE_RADIUS * 2
             if abs(last_x - base_pos[0]) <= drift_limit and abs(last_y - base_pos[1]) <= drift_limit:
                 x, y = self._last_upgrade_station_pos
+                self.upgrade_station_pos = self._last_upgrade_station_pos
 
         if self.mouse_controller.is_in_forbidden_zone(x, y):
             logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
