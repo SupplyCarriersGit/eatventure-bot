@@ -514,6 +514,7 @@ class EatventureBot:
                 interrupt["x"],
                 interrupt["y"],
             )
+            self._click_new_level_override()
             return State.TRANSITION_LEVEL
 
         interrupt_max_y = self._new_level_interrupt_max_y()
@@ -525,9 +526,22 @@ class EatventureBot:
             update_miss=False,
         ):
             logger.info("Priority override: new level detected, transitioning immediately")
+            self._click_new_level_override()
             return State.TRANSITION_LEVEL
 
         return None
+
+    def _click_new_level_override(self):
+        logger.info(
+            "Priority override: clicking new level position at (%s, %s)",
+            config.NEW_LEVEL_POS[0],
+            config.NEW_LEVEL_POS[1],
+        )
+        self.mouse_controller.click(
+            config.NEW_LEVEL_POS[0],
+            config.NEW_LEVEL_POS[1],
+            relative=True,
+        )
 
     def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
