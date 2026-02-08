@@ -330,14 +330,21 @@ class HistoricalLearner:
         self._stop = threading.Event()
         self._thread = None
         self._records = []
+        self._total_completions = 0
         self._last_pair_processed = 0
         self._last_batch_processed = 0
 
         persisted = self.persistence.load() if self.persistence else {}
         if persisted:
             self._records = list(persisted.get("records", []))[-100:]
+            self._total_completions = int(persisted.get("total_completions", len(self._records)))
             self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
             self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
+
+            max_pair_processed = self._total_completions // self.pair_window
+            max_batch_processed = self._total_completions // self.batch_window
+            self._last_pair_processed = min(self._last_pair_processed, max_pair_processed)
+            self._last_batch_processed = min(self._last_batch_processed, max_batch_processed)
 
     def start(self):
         if not self.enabled:
@@ -367,29 +374,33 @@ class HistoricalLearner:
         with self._lock:
             self._records.append(record)
             self._records = self._records[-120:]
+            self._total_completions += 1
         self._persist()
 
     def _loop(self):
         while not self._stop.is_set():
-            self._run_learning_cycle()
+            try:
+                self._run_learning_cycle()
+            except Exception:
+                logger.exception("Historical learner cycle failed; continuing")
             time.sleep(self.interval)
 
     def _run_learning_cycle(self):
         with self._lock:
-            total = len(self._records)
             records = list(self._records)
+            total_completions = int(self._total_completions)
 
-        if total >= self.pair_window and total // self.pair_window > self._last_pair_processed:
+        if total_completions >= self.pair_window and total_completions // self.pair_window > self._last_pair_processed:
             pair_records = records[-self.pair_window:]
             best = min(pair_records, key=lambda item: item.get("time_spent", float("inf")))
             self._apply_best_record(best, f"pair-{self.pair_window}")
-            self._last_pair_processed = total // self.pair_window
+            self._last_pair_processed = total_completions // self.pair_window
 
-        if total >= self.batch_window and total // self.batch_window > self._last_batch_processed:
+        if total_completions >= self.batch_window and total_completions // self.batch_window > self._last_batch_processed:
             batch_records = records[-self.batch_window:]
             best = min(batch_records, key=lambda item: item.get("time_spent", float("inf")))
             self._apply_best_record(best, f"batch-{self.batch_window}")
-            self._last_batch_processed = total // self.batch_window
+            self._last_batch_processed = total_completions // self.batch_window
 
         self._persist()
 
@@ -436,7 +447,12 @@ class HistoricalLearner:
         self.bot.apply_learned_behavior(tuned, reason=label, best_time=record.get("time_spent", 0.0))
 
         if self.auto_write_config:
-            self._write_config_updates(tuned)
+            try:
+                self._write_config_updates(tuned)
+            except OSError as exc:
+                logger.warning("Historical learner could not update config.py: %s", exc)
+            except Exception:
+                logger.exception("Unexpected error while persisting learned config")
 
     def _write_config_updates(self, tuned):
         mapping = {
@@ -472,6 +488,7 @@ class HistoricalLearner:
             return
         state = {
             "records": self._records[-120:],
+            "total_completions": self._total_completions,
             "last_pair_processed": self._last_pair_processed,
             "last_batch_processed": self._last_batch_processed,
         }
@@ -1950,6 +1967,7 @@ class EatventureBot:
                     completion_time = self.completion_detected_time or datetime.now()
                     time_spent = (completion_time - self.current_level_start_time).total_seconds()
 
+                completion_source = self.completion_detected_by or "new level button"
                 self.current_level_start_time = datetime.now()
                 self.completion_detected_time = None
                 self.completion_detected_by = None
@@ -1957,7 +1975,7 @@ class EatventureBot:
                 self.telegram.notify_new_level(self.total_levels_completed, time_spent)
                 self.historical_learner.record_completion(
                     time_spent,
-                    self.completion_detected_by or "new level button",
+                    completion_source,
                 )
 
                 logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
