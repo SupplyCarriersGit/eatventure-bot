@@ -13,6 +13,7 @@ class AssetScanner:
         cpu_count = os.cpu_count() or 1
         self.max_workers = max_workers or min(32, cpu_count + 4)
         self._template_cache = {}
+        self._asset_index_cache = {}
 
     def scan(self, assets_dir, required_templates=None):
         assets_path = Path(assets_dir)
@@ -60,25 +61,38 @@ class AssetScanner:
         return templates
 
     def _collect_template_files(self, assets_path, required_set):
+        indexed = self._index_assets_dir(assets_path)
         if required_set:
-            required_lookup = {name.lower() for name in required_set}
+            template_files = []
+            for template_name in required_set:
+                indexed_path = indexed.get(template_name.lower())
+                if indexed_path is not None:
+                    template_files.append(indexed_path)
         else:
-            required_lookup = None
-
-        template_files = []
-        with os.scandir(assets_path) as entries:
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-                name = entry.name
-                if not name.lower().endswith(".png"):
-                    continue
-                template_name = Path(name).stem
-                if required_lookup and template_name.lower() not in required_lookup:
-                    continue
-                template_files.append(Path(entry.path))
+            template_files = list(indexed.values())
         template_files.sort()
         return template_files
+
+    def _index_assets_dir(self, assets_path):
+        assets_key = str(assets_path)
+        try:
+            mtime = assets_path.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        cached = self._asset_index_cache.get(assets_key)
+        if cached and cached["mtime"] == mtime:
+            return cached["index"]
+
+        indexed = {}
+        with os.scandir(assets_path) as entries:
+            for entry in entries:
+                if not entry.is_file() or not entry.name.lower().endswith(".png"):
+                    continue
+                indexed[Path(entry.name).stem.lower()] = Path(entry.path)
+
+        self._asset_index_cache[assets_key] = {"mtime": mtime, "index": indexed}
+        return indexed
 
     def _load_template(self, template_file):
         template_name = template_file.stem
