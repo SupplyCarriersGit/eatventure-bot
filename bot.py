@@ -382,6 +382,7 @@ class EatventureBot:
         self._new_level_monitor_thread = None
         self._last_upgrade_station_pos = None
         self._last_new_level_override_time = 0.0
+        self._last_idle_click_time = 0.0
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -465,6 +466,22 @@ class EatventureBot:
         self.mouse_controller.click_delay = self.tuner.click_delay
         config.MOUSE_MOVE_DELAY = self.tuner.move_delay
 
+    def _click_idle(self, wait_after=True):
+        now = time.monotonic()
+        cooldown = getattr(config, "IDLE_CLICK_COOLDOWN", 0.0)
+        if cooldown > 0 and now - self._last_idle_click_time < cooldown:
+            logger.debug("Skipping idle click due to cooldown")
+            return False
+        clicked = self.mouse_controller.click(
+            config.IDLE_CLICK_POS[0],
+            config.IDLE_CLICK_POS[1],
+            relative=True,
+            wait_after=wait_after,
+        )
+        if clicked:
+            self._last_idle_click_time = time.monotonic()
+        return clicked
+
     def _scroll_away_from_forbidden_zone(self, y_position):
         if self.forbidden_icon_scrolls >= config.FORBIDDEN_ICON_MAX_SCROLLS:
             logger.warning("Max forbidden-icon scrolls reached; skipping icon")
@@ -494,7 +511,7 @@ class EatventureBot:
                 relative=True,
             )
 
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
             time.sleep(config.FORBIDDEN_ICON_SCROLL_COOLDOWN)
         self.forbidden_icon_scrolls += 1
@@ -1084,7 +1101,7 @@ class EatventureBot:
                 relative=True,
             )
 
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
 
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
@@ -1190,7 +1207,7 @@ class EatventureBot:
         self.state_machine.register_handler(State.WAIT_FOR_UNLOCK, self.handle_wait_for_unlock)
     
     def handle_find_red_icons(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
 
         self.work_done = False
         self.forbidden_icon_scrolls = 0
@@ -1300,6 +1317,7 @@ class EatventureBot:
     def handle_check_unlock(self, current_state):
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         
+        clicked_unlock = False
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
             found, confidence, x, y = self.image_matcher.find_template(
@@ -1312,8 +1330,13 @@ class EatventureBot:
                     logger.warning(f"Unlock button in forbidden zone, skipping")
                 else:
                     logger.info(f"Unlock found, clicking")
-                    self.mouse_controller.click(x, y, relative=True)
-        
+                    clicked_unlock = self.mouse_controller.click(x, y, relative=True)
+
+        if clicked_unlock:
+            if self._sleep_with_interrupt(config.STATE_DELAY):
+                return State.TRANSITION_LEVEL
+            return self.handle_search_upgrade_station(current_state)
+
         return State.SEARCH_UPGRADE_STATION
     
     def handle_search_upgrade_station(self, current_state):
@@ -1382,6 +1405,10 @@ class EatventureBot:
         self._apply_tuning()
         self.red_icon_processed_count += 1
         self.consecutive_failed_cycles += 1
+        self.current_red_icon_index += 1
+        if self.current_red_icon_index < len(self.red_icons):
+            logger.info("Trying next red icon after station search miss")
+            return State.CLICK_RED_ICON
         return State.OPEN_BOXES
     
     def handle_hold_upgrade_station(self, current_state):
@@ -1424,6 +1451,9 @@ class EatventureBot:
         if self.mouse_controller.is_in_forbidden_zone(x, y):
             logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
             self.red_icon_processed_count += 1
+            self.current_red_icon_index += 1
+            if self.current_red_icon_index < len(self.red_icons):
+                return State.CLICK_RED_ICON
             return State.OPEN_BOXES
         
         logger.info("Holding upgrade station click...")
@@ -1438,6 +1468,9 @@ class EatventureBot:
 
         if not self.mouse_controller.mouse_down(x, y, relative=True):
             self.red_icon_processed_count += 1
+            self.current_red_icon_index += 1
+            if self.current_red_icon_index < len(self.red_icons):
+                return State.CLICK_RED_ICON
             return State.OPEN_BOXES
 
         try:
@@ -1482,19 +1515,20 @@ class EatventureBot:
         elapsed_time = time.monotonic() - start_time
         logger.info(f"Clicking complete: hold duration {elapsed_time:.1f}s")
         
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
             if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
                 return State.TRANSITION_LEVEL
         
         self.red_icon_processed_count += 1
-        
+        self.current_red_icon_index += 1
+
         logger.info("✓ Upgrade station complete → Stats upgrade next")
         return interrupt_state or State.UPGRADE_STATS
     
     def handle_upgrade_stats(self, current_state):
         logger.info("⬆ Stats upgrade starting")
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         
         extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
@@ -1546,12 +1580,12 @@ class EatventureBot:
                     return State.TRANSITION_LEVEL
                 last_new_level_check = elapsed
         
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         logger.info("========== STAT UPGRADE COMPLETED ==========")
         return State.OPEN_BOXES
     
     def handle_open_boxes(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
@@ -1614,7 +1648,7 @@ class EatventureBot:
             return State.FIND_RED_ICONS
     
     def handle_scroll(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
@@ -1655,7 +1689,7 @@ class EatventureBot:
                 duration=scroll_duration, relative=True
             )
         
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         
         self.scroll_count += 1
         
@@ -1669,7 +1703,7 @@ class EatventureBot:
         return State.FIND_RED_ICONS
     
     def handle_check_new_level(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
             if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
                 return State.TRANSITION_LEVEL
@@ -1698,7 +1732,7 @@ class EatventureBot:
         return State.FIND_RED_ICONS
     
     def handle_transition_level(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         
         max_attempts = 5
         
@@ -1745,7 +1779,7 @@ class EatventureBot:
         return State.FIND_RED_ICONS
     
     def handle_wait_for_unlock(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._click_idle()
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
             if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
                 return State.TRANSITION_LEVEL
