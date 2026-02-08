@@ -183,6 +183,16 @@ AI_STATS_UPGRADE_MISS_STEP = 0.005
 AI_VISION_STATE_FILE = f"{LOGS_DIR}/vision_state.json"
 AI_VISION_SAVE_INTERVAL = 1.0
 
+# Historical Learning Settings
+HISTORICAL_LEARNING_ENABLED = True
+HISTORICAL_LEARNING_STATE_FILE = f"{LOGS_DIR}/historical_learning_state.json"
+HISTORICAL_LEARNING_CONFIG_PATH = "config.py"
+HISTORICAL_LEARNING_POLL_INTERVAL = 0.05
+HISTORICAL_LEARNING_PAIR_WINDOW = 2
+HISTORICAL_LEARNING_MAJOR_WINDOW = 7
+HISTORICAL_LEARNING_PAIR_BLEND = 0.18
+HISTORICAL_LEARNING_MAJOR_BLEND = 0.34
+
 # Forbidden Zones Configuration
 # These zones prevent the bot from clicking on critical UI elements
 # Each zone is defined by: X_MIN, X_MAX, Y_MIN, Y_MAX coordinates
