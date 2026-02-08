@@ -2,6 +2,7 @@ import json
 import os
 import time
 import logging
+import re
 import threading
 from datetime import datetime
 
@@ -315,6 +316,168 @@ class VisionPersistence:
         self._last_save_time = now
 
 
+class HistoricalLearner:
+    def __init__(self, bot, persistence=None):
+        self.bot = bot
+        self.persistence = persistence
+        self.enabled = config.AI_LEARNING_ENABLED
+        self.interval = max(0.01, float(getattr(config, "AI_LEARNING_THREAD_INTERVAL", 0.05)))
+        self.pair_window = max(2, int(getattr(config, "AI_LEARNING_PAIR_WINDOW", 2)))
+        self.batch_window = max(2, int(getattr(config, "AI_LEARNING_BATCH_WINDOW", 7)))
+        self.ema_alpha = max(0.01, min(0.8, float(getattr(config, "AI_LEARNING_EMA_ALPHA", 0.18))))
+        self.auto_write_config = bool(getattr(config, "AI_LEARNING_AUTOWRITE_CONFIG", False))
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._records = []
+        self._last_pair_processed = 0
+        self._last_batch_processed = 0
+
+        persisted = self.persistence.load() if self.persistence else {}
+        if persisted:
+            self._records = list(persisted.get("records", []))[-100:]
+            self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
+            self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
+
+    def start(self):
+        if not self.enabled:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="historical_learner", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._persist()
+
+    def record_completion(self, time_spent, source):
+        if not self.enabled or time_spent <= 0:
+            return
+        snapshot = self.bot.get_runtime_behavior_snapshot()
+        record = {
+            "timestamp": time.time(),
+            "time_spent": float(time_spent),
+            "source": source,
+            "behavior": snapshot,
+        }
+        with self._lock:
+            self._records.append(record)
+            self._records = self._records[-120:]
+        self._persist()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self._run_learning_cycle()
+            time.sleep(self.interval)
+
+    def _run_learning_cycle(self):
+        with self._lock:
+            total = len(self._records)
+            records = list(self._records)
+
+        if total >= self.pair_window and total // self.pair_window > self._last_pair_processed:
+            pair_records = records[-self.pair_window:]
+            best = min(pair_records, key=lambda item: item.get("time_spent", float("inf")))
+            self._apply_best_record(best, f"pair-{self.pair_window}")
+            self._last_pair_processed = total // self.pair_window
+
+        if total >= self.batch_window and total // self.batch_window > self._last_batch_processed:
+            batch_records = records[-self.batch_window:]
+            best = min(batch_records, key=lambda item: item.get("time_spent", float("inf")))
+            self._apply_best_record(best, f"batch-{self.batch_window}")
+            self._last_batch_processed = total // self.batch_window
+
+        self._persist()
+
+    def _ema(self, current, target):
+        return (1 - self.ema_alpha) * current + self.ema_alpha * target
+
+    def _clamp(self, value, minimum, maximum):
+        return max(minimum, min(maximum, value))
+
+    def _apply_best_record(self, record, label):
+        behavior = record.get("behavior") or {}
+        if not behavior:
+            return
+
+        current = self.bot.get_runtime_behavior_snapshot()
+        tuned = {}
+        keys = ("click_delay", "move_delay", "upgrade_click_interval", "search_interval")
+        for key in keys:
+            if key not in behavior or key not in current:
+                continue
+            tuned[key] = self._ema(float(current[key]), float(behavior[key]))
+
+        tuned["click_delay"] = self._clamp(
+            tuned.get("click_delay", current["click_delay"]),
+            config.AI_LEARNING_MIN_CLICK_DELAY,
+            config.AI_LEARNING_MAX_CLICK_DELAY,
+        )
+        tuned["move_delay"] = self._clamp(
+            tuned.get("move_delay", current["move_delay"]),
+            config.AI_LEARNING_MIN_MOVE_DELAY,
+            config.AI_LEARNING_MAX_MOVE_DELAY,
+        )
+        tuned["upgrade_click_interval"] = self._clamp(
+            tuned.get("upgrade_click_interval", current["upgrade_click_interval"]),
+            config.AI_LEARNING_MIN_UPGRADE_INTERVAL,
+            config.AI_LEARNING_MAX_UPGRADE_INTERVAL,
+        )
+        tuned["search_interval"] = self._clamp(
+            tuned.get("search_interval", current["search_interval"]),
+            config.AI_LEARNING_MIN_SEARCH_INTERVAL,
+            config.AI_LEARNING_MAX_SEARCH_INTERVAL,
+        )
+
+        self.bot.apply_learned_behavior(tuned, reason=label, best_time=record.get("time_spent", 0.0))
+
+        if self.auto_write_config:
+            self._write_config_updates(tuned)
+
+    def _write_config_updates(self, tuned):
+        mapping = {
+            "CLICK_DELAY": tuned.get("click_delay"),
+            "MOUSE_MOVE_DELAY": tuned.get("move_delay"),
+            "UPGRADE_CLICK_INTERVAL": tuned.get("upgrade_click_interval"),
+            "UPGRADE_SEARCH_INTERVAL": tuned.get("search_interval"),
+        }
+        config_path = os.path.join(os.path.dirname(__file__), "config.py")
+        if not os.path.exists(config_path):
+            return
+
+        with open(config_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+
+        changed = False
+        for key, value in mapping.items():
+            if value is None:
+                continue
+            replacement = f"{key} = {float(value):.6f}"
+            pattern = rf"^{key}\s*=\s*[^\n]+"
+            updated, count = re.subn(pattern, replacement, content, count=1, flags=re.MULTILINE)
+            if count:
+                content = updated
+                changed = True
+
+        if changed:
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+
+    def _persist(self):
+        if not self.persistence:
+            return
+        state = {
+            "records": self._records[-120:],
+            "last_pair_processed": self._last_pair_processed,
+            "last_batch_processed": self._last_batch_processed,
+        }
+        self.persistence.save(state)
+
+
 class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot...")
@@ -371,6 +534,11 @@ class EatventureBot:
         )
         self.vision_optimizer = VisionOptimizer(self.vision_persistence)
         self.vision_optimizer.apply_persisted_state(self.vision_persistence.load())
+        self.learning_persistence = VisionPersistence(
+            config.AI_LEARNING_STATE_FILE,
+            config.AI_LEARNING_SAVE_INTERVAL,
+        )
+        self.historical_learner = HistoricalLearner(self, self.learning_persistence)
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
@@ -1186,6 +1354,30 @@ class EatventureBot:
                 available.append((template_name, template, mask))
         return available
 
+    def get_runtime_behavior_snapshot(self):
+        return {
+            "click_delay": float(self.tuner.click_delay),
+            "move_delay": float(self.tuner.move_delay),
+            "upgrade_click_interval": float(self.tuner.upgrade_click_interval),
+            "search_interval": float(self.tuner.search_interval),
+        }
+
+    def apply_learned_behavior(self, learned, reason="historical", best_time=0.0):
+        if not learned:
+            return
+        self.tuner.click_delay = float(learned.get("click_delay", self.tuner.click_delay))
+        self.tuner.move_delay = float(learned.get("move_delay", self.tuner.move_delay))
+        self.tuner.upgrade_click_interval = float(
+            learned.get("upgrade_click_interval", self.tuner.upgrade_click_interval)
+        )
+        self.tuner.search_interval = float(learned.get("search_interval", self.tuner.search_interval))
+        logger.info(
+            "Historical learner (%s) applied timing profile from best %.2fs run",
+            reason,
+            best_time,
+        )
+        self._apply_tuning()
+
     def _required_template_names(self):
         box_names = [f"box{i}" for i in range(1, 6)]
         required = set(self.red_icon_templates)
@@ -1459,7 +1651,7 @@ class EatventureBot:
         logger.info("Holding upgrade station click...")
 
         max_hold_time = config.UPGRADE_HOLD_DURATION
-        check_interval = config.UPGRADE_CHECK_INTERVAL
+        check_interval = max(config.UPGRADE_CHECK_INTERVAL, self.tuner.search_interval)
         start_time = time.monotonic()
         end_time = start_time + max_hold_time
         upgrade_missing_logged = False
@@ -1763,6 +1955,10 @@ class EatventureBot:
                 self.completion_detected_by = None
 
                 self.telegram.notify_new_level(self.total_levels_completed, time_spent)
+                self.historical_learner.record_completion(
+                    time_spent,
+                    self.completion_detected_by or "new level button",
+                )
 
                 logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
                 logger.info("Waiting for unlock button after level transition")
@@ -1835,6 +2031,8 @@ class EatventureBot:
                 daemon=True,
             )
             self._new_level_monitor_thread.start()
+
+        self.historical_learner.start()
         
         try:
             while self.running:
@@ -1861,6 +2059,7 @@ class EatventureBot:
         self._new_level_monitor_stop.set()
         if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
             self._new_level_monitor_thread.join(timeout=1.0)
+        self.historical_learner.stop()
         if self.overlay:
             self.overlay.stop()
         logger.info("Bot stopped")
