@@ -336,6 +336,8 @@ class EatventureBot:
         ]
         self.templates = self.load_templates()
         self.available_red_icon_templates = self._build_available_red_icon_templates()
+        self._red_template_hit_counts = {}
+        self._red_template_priority = []
         self.running = False
         self.red_icon_cycle_count = 0
         self.red_icons = []
@@ -651,13 +653,14 @@ class EatventureBot:
         roi = screenshot[y_min:y_max, x_min:x_max]
         detections = {}
         buckets = {}
+        template_hits = {}
         threshold = (
             self.vision_optimizer.new_level_red_icon_threshold
             if self.vision_optimizer.enabled
             else config.NEW_LEVEL_RED_ICON_THRESHOLD
         )
 
-        for template_name, template, mask in self.available_red_icon_templates:
+        for template_name, template, mask in self._iter_red_icon_templates():
             icons = self.image_matcher.find_all_templates(
                 roi,
                 template,
@@ -679,6 +682,7 @@ class EatventureBot:
                     template_name,
                     conf,
                 )
+                template_hits[template_name] = template_hits.get(template_name, 0) + 1
 
         min_matches = config.NEW_LEVEL_RED_ICON_MIN_MATCHES
         best_match = None
@@ -688,6 +692,7 @@ class EatventureBot:
                 if best_match is None or max_conf > best_match[1]:
                     best_match = (True, max_conf, x, y)
 
+        self._update_red_template_priority(template_hits)
         result = best_match or (False, 0.0, 0, 0)
         if result[0]:
             self.vision_optimizer.update_new_level_red_icon_confidence(result[1])
@@ -780,12 +785,9 @@ class EatventureBot:
             else config.STATS_RED_ICON_THRESHOLD
         )
         best_confidence = 0.0
+        template_hits = {}
 
-        for template_name in self.red_icon_templates:
-            if template_name not in self.templates:
-                continue
-
-            template, mask = self.templates[template_name]
+        for template_name, template, mask in self._iter_red_icon_templates():
             icons = self.image_matcher.find_all_templates(
                 roi,
                 template,
@@ -802,7 +804,9 @@ class EatventureBot:
                     if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
                         continue
                     best_confidence = max(best_confidence, conf)
+                    template_hits[template_name] = template_hits.get(template_name, 0) + 1
 
+        self._update_red_template_priority(template_hits)
         return best_confidence > 0, best_confidence
 
     def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=10, bucket_size=10):
@@ -883,7 +887,7 @@ class EatventureBot:
         threshold = max(0.0, base_threshold - config.RED_ICON_REFINE_THRESHOLD_DROP)
         best_match = None
 
-        for template_name, template, mask in self.available_red_icon_templates:
+        for template_name, template, mask in self._iter_red_icon_templates():
             found, confidence, rx, ry = self.image_matcher.find_template(
                 roi,
                 template,
@@ -921,6 +925,7 @@ class EatventureBot:
 
         detections = {}
         buckets = {}
+        template_hits = {}
         if max_y is not None:
             screenshot = screenshot[:max_y, :]
         threshold = (
@@ -929,7 +934,7 @@ class EatventureBot:
             else config.RED_ICON_THRESHOLD
         )
 
-        for template_name, template, mask in self.available_red_icon_templates:
+        for template_name, template, mask in self._iter_red_icon_templates():
             icons = self.image_matcher.find_all_templates(
                 screenshot,
                 template,
@@ -950,6 +955,9 @@ class EatventureBot:
                     template_name,
                     conf,
                 )
+                template_hits[template_name] = template_hits.get(template_name, 0) + 1
+
+        self._update_red_template_priority(template_hits)
 
         min_matches = config.RED_ICON_MIN_MATCHES
         red_icons = []
@@ -992,7 +1000,7 @@ class EatventureBot:
         if roi.size == 0:
             return False
 
-        for template_name, template, mask in self.available_red_icon_templates:
+        for template_name, template, mask in self._iter_red_icon_templates():
             found, confidence, cx, cy = self.image_matcher.find_template(
                 roi,
                 template,
@@ -1111,6 +1119,47 @@ class EatventureBot:
         required_templates = self._required_template_names()
         scanner = AssetScanner(self.image_matcher)
         return scanner.scan(config.ASSETS_DIR, required_templates=required_templates)
+
+
+    def _iter_red_icon_templates(self):
+        if not self.available_red_icon_templates:
+            return []
+
+        if not self._red_template_priority:
+            return self.available_red_icon_templates
+
+        by_name = {name: (name, template, mask) for name, template, mask in self.available_red_icon_templates}
+        ordered = []
+        seen = set()
+
+        for template_name in self._red_template_priority:
+            item = by_name.get(template_name)
+            if item is None:
+                continue
+            ordered.append(item)
+            seen.add(template_name)
+
+        for item in self.available_red_icon_templates:
+            if item[0] in seen:
+                continue
+            ordered.append(item)
+
+        return ordered
+
+    def _update_red_template_priority(self, hit_counts):
+        if not hit_counts:
+            return
+
+        for template_name, count in hit_counts.items():
+            self._red_template_hit_counts[template_name] = self._red_template_hit_counts.get(template_name, 0) + count
+
+        sorted_hits = sorted(
+            self._red_template_hit_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        limit = max(1, getattr(config, "RED_ICON_PRIORITY_TEMPLATE_LIMIT", 8))
+        self._red_template_priority = [name for name, _ in sorted_hits[:limit]]
 
     def _build_available_red_icon_templates(self):
         available = []

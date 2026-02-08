@@ -139,20 +139,52 @@ class ImageMatcher:
                 continue
             
             result = cv2.matchTemplate(screenshot, scaled_template, cv2.TM_SQDIFF_NORMED, mask=scaled_mask)
-            
-            locations = np.where(result <= (1 - thresh))
-            
+
+            fast_matches = self._find_sqdiff_matches(
+                result,
+                threshold=thresh,
+                min_distance=min_distance,
+            )
+
             h, w = scaled_template.shape[:2]
-            for pt in zip(*locations[::-1]):
-                confidence = 1 - result[pt[1], pt[0]]
-                center_x = pt[0] + w // 2
-                center_y = pt[1] + h // 2
+            for confidence, match_x, match_y in fast_matches:
+                center_x = match_x + w // 2
+                center_y = match_y + h // 2
                 all_matches.append((confidence, center_x, center_y, w, h))
         
         if all_matches:
             all_matches = self._non_max_suppression(all_matches, min_distance)
         
         return [(conf, x, y) for conf, x, y, _, _ in all_matches]
+
+    def _find_sqdiff_matches(self, result, threshold, min_distance):
+        if result.size == 0:
+            return []
+
+        max_error = 1 - threshold
+        if max_error < 0:
+            return []
+
+        suppression = max(1, int(min_distance))
+        working = result.copy()
+        height, width = working.shape[:2]
+        matches = []
+
+        while True:
+            min_val, _, min_loc, _ = cv2.minMaxLoc(working)
+            if min_val > max_error:
+                break
+
+            x, y = min_loc
+            matches.append((1 - min_val, x, y))
+
+            x1 = max(0, x - suppression)
+            x2 = min(width, x + suppression + 1)
+            y1 = max(0, y - suppression)
+            y2 = min(height, y + suppression + 1)
+            working[y1:y2, x1:x2] = 1.0
+
+        return matches
     
     def _non_max_suppression(self, matches, min_distance):
         if not matches:
