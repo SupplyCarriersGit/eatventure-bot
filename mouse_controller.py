@@ -30,7 +30,22 @@ class MouseController:
             screen_x = x
             screen_y = y
 
-        return int(screen_x), int(screen_y)
+        return self._clamp_to_screen(int(screen_x), int(screen_y))
+
+    def _clamp_to_screen(self, screen_x, screen_y):
+        width = max(1, win32api.GetSystemMetrics(0))
+        height = max(1, win32api.GetSystemMetrics(1))
+        clamped_x = max(0, min(int(screen_x), width - 1))
+        clamped_y = max(0, min(int(screen_y), height - 1))
+        if clamped_x != int(screen_x) or clamped_y != int(screen_y):
+            logger.warning(
+                "Clamped cursor target from (%s, %s) to (%s, %s)",
+                screen_x,
+                screen_y,
+                clamped_x,
+                clamped_y,
+            )
+        return clamped_x, clamped_y
 
     def _send_click(self, screen_x, screen_y, down_up_delay=None):
         if self._should_move_cursor(screen_x, screen_y):
@@ -208,6 +223,7 @@ class MouseController:
                 screen_x = x
                 screen_y = y
 
+            screen_x, screen_y = self._clamp_to_screen(int(screen_x), int(screen_y))
             win32api.SetCursorPos((int(screen_x), int(screen_y)))
             self._last_cursor_pos = (int(screen_x), int(screen_y))
             logger.info(f"Cursor moved to window position ({x}, {y})")
@@ -297,6 +313,9 @@ class MouseController:
                 screen_to_y = to_y
 
             self._ensure_min_drag_interval()
+
+            screen_from_x, screen_from_y = self._clamp_to_screen(int(screen_from_x), int(screen_from_y))
+            screen_to_x, screen_to_y = self._clamp_to_screen(int(screen_to_x), int(screen_to_y))
 
             win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
             self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
