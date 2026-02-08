@@ -3,6 +3,7 @@ import win32con
 import win32gui
 import time
 import logging
+import threading
 import config
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ class MouseController:
         self._last_click_time = 0.0
         self._last_cursor_pos = None
         self._last_drag_time = 0.0
+        self._mouse_action_lock = threading.RLock()
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         if relative:
@@ -197,136 +199,143 @@ class MouseController:
         return x, y
     
     def move_to(self, x, y, relative=True):
-        if relative:
-            win_x, win_y = self.get_window_position()
-            screen_x = win_x + x
-            screen_y = win_y + y
-        else:
-            screen_x = x
-            screen_y = y
-        
-        win32api.SetCursorPos((int(screen_x), int(screen_y)))
-        self._last_cursor_pos = (int(screen_x), int(screen_y))
-        logger.info(f"Cursor moved to window position ({x}, {y})")
+        with self._mouse_action_lock:
+            if relative:
+                win_x, win_y = self.get_window_position()
+                screen_x = win_x + x
+                screen_y = win_y + y
+            else:
+                screen_x = x
+                screen_y = y
+
+            win32api.SetCursorPos((int(screen_x), int(screen_y)))
+            self._last_cursor_pos = (int(screen_x), int(screen_y))
+            logger.info(f"Cursor moved to window position ({x}, {y})")
     
     def click(self, x, y, relative=True, delay=None, wait_after=True):
-        screen_pos = self._resolve_screen_position(x, y, relative=relative)
-        if screen_pos is None:
+        with self._mouse_action_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                if wait_after:
+                    time.sleep(self.click_delay if delay is None else delay)
+                return False
+
+            screen_x, screen_y = screen_pos
+            self._send_click(screen_x, screen_y)
+
+            logger.info(f"Clicked at ({screen_x}, {screen_y})")
+
             if wait_after:
                 time.sleep(self.click_delay if delay is None else delay)
-            return False
-
-        screen_x, screen_y = screen_pos
-        self._send_click(screen_x, screen_y)
-
-        logger.info(f"Clicked at ({screen_x}, {screen_y})")
-
-        if wait_after:
-            time.sleep(self.click_delay if delay is None else delay)
-        return True
+            return True
 
     def mouse_down(self, x, y, relative=True):
-        screen_pos = self._resolve_screen_position(x, y, relative=relative)
-        if screen_pos is None:
-            return False
+        with self._mouse_action_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
 
-        screen_x, screen_y = screen_pos
-        self._send_mouse_down(screen_x, screen_y)
-        self._last_cursor_pos = (screen_x, screen_y)
-        logger.info(f"Mouse down at ({screen_x}, {screen_y})")
-        return True
+            screen_x, screen_y = screen_pos
+            self._send_mouse_down(screen_x, screen_y)
+            self._last_cursor_pos = (screen_x, screen_y)
+            logger.info(f"Mouse down at ({screen_x}, {screen_y})")
+            return True
 
     def mouse_up(self, x, y, relative=True):
-        screen_pos = self._resolve_screen_position(x, y, relative=relative, check_forbidden=False)
-        if screen_pos is None:
-            return False
+        with self._mouse_action_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative, check_forbidden=False)
+            if screen_pos is None:
+                return False
 
-        screen_x, screen_y = screen_pos
-        self._send_mouse_up(screen_x, screen_y)
-        self._last_cursor_pos = (screen_x, screen_y)
-        logger.info(f"Mouse up at ({screen_x}, {screen_y})")
-        return True
+            screen_x, screen_y = screen_pos
+            self._send_mouse_up(screen_x, screen_y)
+            self._last_cursor_pos = (screen_x, screen_y)
+            logger.info(f"Mouse up at ({screen_x}, {screen_y})")
+            return True
     
     def double_click(self, x, y, relative=True):
-        self.click(x, y, relative)
-        time.sleep(config.DOUBLE_CLICK_DELAY)
-        self.click(x, y, relative)
+        with self._mouse_action_lock:
+            self.click(x, y, relative)
+            time.sleep(config.DOUBLE_CLICK_DELAY)
+            self.click(x, y, relative)
     
     def hold_at(self, x, y, duration=None, relative=True):
         if duration is None:
             duration = config.UPGRADE_HOLD_DURATION
 
-        screen_pos = self._resolve_screen_position(x, y, relative=relative)
-        if screen_pos is None:
-            return False
+        with self._mouse_action_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
 
-        screen_x, screen_y = screen_pos
+            screen_x, screen_y = screen_pos
 
-        logger.info(
-            "Holding click at (%s, %s) for %ss",
-            screen_x,
-            screen_y,
-            duration,
-        )
-        self._send_mouse_down(screen_x, screen_y)
-        time.sleep(duration)
-        self._send_mouse_up(screen_x, screen_y)
-        time.sleep(self.click_delay)
-        return True
+            logger.info(
+                "Holding click at (%s, %s) for %ss",
+                screen_x,
+                screen_y,
+                duration,
+            )
+            self._send_mouse_down(screen_x, screen_y)
+            time.sleep(duration)
+            self._send_mouse_up(screen_x, screen_y)
+            time.sleep(self.click_delay)
+            return True
     
     def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True):
-        if relative:
-            win_x, win_y = self.get_window_position()
-            screen_from_x = win_x + from_x
-            screen_from_y = win_y + from_y
-            screen_to_x = win_x + to_x
-            screen_to_y = win_y + to_y
-        else:
-            screen_from_x = from_x
-            screen_from_y = from_y
-            screen_to_x = to_x
-            screen_to_y = to_y
+        with self._mouse_action_lock:
+            if relative:
+                win_x, win_y = self.get_window_position()
+                screen_from_x = win_x + from_x
+                screen_from_y = win_y + from_y
+                screen_to_x = win_x + to_x
+                screen_to_y = win_y + to_y
+            else:
+                screen_from_x = from_x
+                screen_from_y = from_y
+                screen_to_x = to_x
+                screen_to_y = to_y
 
-        self._ensure_min_drag_interval()
-        
-        win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
-        self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
-        self._correct_cursor_position(int(screen_from_x), int(screen_from_y))
-        self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
-        time.sleep(config.MOUSE_MOVE_DELAY)
-        
-        win32api.mouse_event(
-            win32con.MOUSEEVENTF_LEFTDOWN,
-            int(screen_from_x),
-            int(screen_from_y),
-            0,
-            0,
-        )
-        time.sleep(config.MOUSE_DOWN_UP_DELAY)
-        
-        steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-        duration = max(duration, 0.001)
-        start_time = time.monotonic()
-        for i in range(steps + 1):
-            t = i / steps
-            current_x = int(screen_from_x + (screen_to_x - screen_from_x) * t)
-            current_y = int(screen_from_y + (screen_to_y - screen_from_y) * t)
-            win32api.SetCursorPos((current_x, current_y))
-            target_time = start_time + (duration * t)
-            sleep_time = target_time - time.monotonic()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-        
-        win32api.mouse_event(
-            win32con.MOUSEEVENTF_LEFTUP,
-            int(screen_to_x),
-            int(screen_to_y),
-            0,
-            0,
-        )
-        self._ensure_cursor_at_target(int(screen_to_x), int(screen_to_y))
-        self._correct_cursor_position(int(screen_to_x), int(screen_to_y))
-        self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
-        logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
-        settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
-        time.sleep(settle_delay if settle_delay > 0 else self.click_delay)
+            self._ensure_min_drag_interval()
+
+            win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
+            self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
+            self._correct_cursor_position(int(screen_from_x), int(screen_from_y))
+            self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
+            time.sleep(config.MOUSE_MOVE_DELAY)
+
+            win32api.mouse_event(
+                win32con.MOUSEEVENTF_LEFTDOWN,
+                int(screen_from_x),
+                int(screen_from_y),
+                0,
+                0,
+            )
+            time.sleep(config.MOUSE_DOWN_UP_DELAY)
+
+            steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
+            duration = max(duration, 0.001)
+            start_time = time.monotonic()
+            for i in range(steps + 1):
+                t = i / steps
+                current_x = int(screen_from_x + (screen_to_x - screen_from_x) * t)
+                current_y = int(screen_from_y + (screen_to_y - screen_from_y) * t)
+                win32api.SetCursorPos((current_x, current_y))
+                target_time = start_time + (duration * t)
+                sleep_time = target_time - time.monotonic()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+            win32api.mouse_event(
+                win32con.MOUSEEVENTF_LEFTUP,
+                int(screen_to_x),
+                int(screen_to_y),
+                0,
+                0,
+            )
+            self._ensure_cursor_at_target(int(screen_to_x), int(screen_to_y))
+            self._correct_cursor_position(int(screen_to_x), int(screen_to_y))
+            self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
+            logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
+            settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
+            time.sleep(settle_delay if settle_delay > 0 else self.click_delay)
