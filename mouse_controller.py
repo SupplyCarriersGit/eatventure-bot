@@ -48,24 +48,43 @@ class MouseController:
         return clamped_x, clamped_y
 
     def _send_click(self, screen_x, screen_y, down_up_delay=None):
-        if self._should_move_cursor(screen_x, screen_y):
-            self._move_cursor(screen_x, screen_y)
+        retries = max(1, int(getattr(config, "MOUSE_CLICK_RETRY_COUNT", 1)))
+        settle_retry_delay = max(0.0, float(getattr(config, "MOUSE_CLICK_RETRY_SETTLE_DELAY", 0.0)))
 
-        self._ensure_cursor_at_target(screen_x, screen_y)
-        self._correct_cursor_position(screen_x, screen_y)
+        for attempt in range(retries):
+            travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
+
+            if self._should_move_cursor(screen_x, screen_y):
+                self._move_cursor(screen_x, screen_y)
+
+            self._ensure_cursor_at_target(screen_x, screen_y)
+            self._correct_cursor_position(screen_x, screen_y)
+            self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
+            current = win32api.GetCursorPos()
+            tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+            if abs(current[0] - screen_x) <= tolerance and abs(current[1] - screen_y) <= tolerance:
+                break
+
+            win32api.SetCursorPos((int(screen_x), int(screen_y)))
+            self._last_cursor_pos = (int(screen_x), int(screen_y))
+            if attempt < retries - 1 and settle_retry_delay > 0:
+                time.sleep(settle_retry_delay)
+
         self._ensure_min_click_interval()
-
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
         time.sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         self._last_click_time = time.monotonic()
 
     def _send_mouse_down(self, screen_x, screen_y):
+        travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
+
         if self._should_move_cursor(screen_x, screen_y):
             self._move_cursor(screen_x, screen_y)
 
         self._ensure_cursor_at_target(screen_x, screen_y)
         self._correct_cursor_position(screen_x, screen_y)
+        self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
         self._ensure_min_click_interval()
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
 
@@ -134,6 +153,36 @@ class MouseController:
 
         time.sleep(config.MOUSE_MOVE_DELAY)
         self._last_cursor_pos = target
+
+    def _estimate_cursor_distance(self, screen_x, screen_y):
+        target = (int(screen_x), int(screen_y))
+        try:
+            current = win32api.GetCursorPos()
+        except Exception:
+            current = self._last_cursor_pos
+
+        if current is None:
+            return 0.0
+
+        return ((current[0] - target[0]) ** 2 + (current[1] - target[1]) ** 2) ** 0.5
+
+    def _stabilize_before_click(self, screen_x, screen_y, distance_override=None):
+        if distance_override is None:
+            target = (int(screen_x), int(screen_y))
+            prev = self._last_cursor_pos
+            if prev is None:
+                distance = 0.0
+            else:
+                distance = ((prev[0] - target[0]) ** 2 + (prev[1] - target[1]) ** 2) ** 0.5
+        else:
+            distance = max(0.0, float(distance_override))
+
+        base_delay = max(0.0, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_BASE", 0.0)))
+        max_delay = max(base_delay, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_MAX", base_delay)))
+        distance_factor = max(0.0, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR", 0.0)))
+        stabilize_delay = min(max_delay, base_delay + (distance * distance_factor))
+        if stabilize_delay > 0:
+            time.sleep(stabilize_delay)
 
     def _ensure_cursor_at_target(self, screen_x, screen_y):
         target = (int(screen_x), int(screen_y))
