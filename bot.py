@@ -315,155 +315,6 @@ class VisionPersistence:
         self._last_save_time = now
 
 
-
-
-class HistoricalLearningPersistence:
-    def __init__(self, path):
-        self.path = path
-
-    def load(self):
-        if not self.path or not os.path.exists(self.path):
-            return {}
-        try:
-            with open(self.path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except json.JSONDecodeError as exc:
-            logger.warning("Failed to load historical learning state from %s: %s", self.path, exc)
-            return {}
-
-    def save(self, state):
-        if not self.path:
-            return
-        directory = os.path.dirname(self.path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-
-
-class HistoricalLearningEngine:
-    PARAMETER_KEYS = (
-        "SEARCH_INTERVAL",
-        "UPGRADE_SEARCH_INTERVAL",
-        "UPGRADE_CLICK_INTERVAL",
-        "MAIN_LOOP_DELAY",
-        "NEW_LEVEL_MONITOR_INTERVAL",
-        "NEW_LEVEL_INTERRUPT_INTERVAL",
-        "SCROLL_MIN_INTERVAL",
-    )
-
-    def __init__(self, persistence, config_path):
-        self.enabled = config.HISTORICAL_LEARNING_ENABLED
-        self.persistence = persistence
-        self.config_path = config_path
-        self.poll_interval = max(config.HISTORICAL_LEARNING_POLL_INTERVAL, 0.01)
-        self.pair_window = max(config.HISTORICAL_LEARNING_PAIR_WINDOW, 2)
-        self.major_window = max(config.HISTORICAL_LEARNING_MAJOR_WINDOW, self.pair_window)
-        self.pair_blend = max(0.01, min(config.HISTORICAL_LEARNING_PAIR_BLEND, 0.95))
-        self.major_blend = max(self.pair_blend, min(config.HISTORICAL_LEARNING_MAJOR_BLEND, 0.98))
-        self._lock = threading.Lock()
-        self._pending = []
-        self._history = []
-        self._stop_event = threading.Event()
-        self._thread = None
-
-    def start(self):
-        if not self.enabled:
-            return
-        if self._thread and self._thread.is_alive():
-            return
-        state = self.persistence.load()
-        with self._lock:
-            self._history = list(state.get("history", []))[-self.major_window * 5 :]
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._worker, name="historical_learning", daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-
-    def record_completion(self, level_number, time_spent):
-        if not self.enabled or time_spent <= 0:
-            return
-        item = {
-            "level": int(level_number),
-            "time_spent": float(time_spent),
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "params": {key: float(getattr(config, key)) for key in self.PARAMETER_KEYS},
-        }
-        with self._lock:
-            self._pending.append(item)
-
-    def _worker(self):
-        while not self._stop_event.is_set():
-            self._process_pending()
-            self._stop_event.wait(self.poll_interval)
-
-    def _process_pending(self):
-        with self._lock:
-            if not self._pending:
-                return
-            pending = list(self._pending)
-            self._pending.clear()
-            self._history.extend(pending)
-            self._history = self._history[-self.major_window * 5 :]
-
-        for item in pending:
-            self._apply_learning(item)
-
-        self.persistence.save({"history": self._history[-self.major_window * 5 :]})
-
-    def _apply_learning(self, newest):
-        pair = self._history[-self.pair_window :]
-        major = self._history[-self.major_window :]
-
-        if len(pair) == self.pair_window:
-            best_pair = min(pair, key=lambda x: x["time_spent"])
-            self._blend_toward(best_pair["params"], self.pair_blend, "pair")
-
-        if len(major) == self.major_window:
-            best_major = min(major, key=lambda x: x["time_spent"])
-            self._blend_toward(best_major["params"], self.major_blend, "major")
-
-        self._write_config_file()
-        logger.info(
-            "Historical learning updated after level %s (%.2fs)",
-            newest["level"],
-            newest["time_spent"],
-        )
-
-    def _blend_toward(self, target_params, blend, label):
-        for key in self.PARAMETER_KEYS:
-            current = float(getattr(config, key))
-            target = float(target_params.get(key, current))
-            tuned = (1 - blend) * current + blend * target
-            setattr(config, key, tuned)
-        logger.info("Historical learning (%s window) blended runtime parameters", label)
-
-    def _write_config_file(self):
-        if not self.config_path or not os.path.exists(self.config_path):
-            return
-
-        with open(self.config_path, "r", encoding="utf-8") as handle:
-            lines = handle.readlines()
-
-        value_map = {key: getattr(config, key) for key in self.PARAMETER_KEYS}
-        changed = False
-        for idx, line in enumerate(lines):
-            stripped = line.strip()
-            for key, value in value_map.items():
-                if stripped.startswith(f"{key} ="):
-                    lines[idx] = f"{key} = {value:.6f}\n"
-                    changed = True
-                    break
-
-        if changed:
-            with open(self.config_path, "w", encoding="utf-8") as handle:
-                handle.writelines(lines)
-
-
 class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot...")
@@ -520,10 +371,6 @@ class EatventureBot:
         )
         self.vision_optimizer = VisionOptimizer(self.vision_persistence)
         self.vision_optimizer.apply_persisted_state(self.vision_persistence.load())
-        self.historical_learning = HistoricalLearningEngine(
-            HistoricalLearningPersistence(config.HISTORICAL_LEARNING_STATE_FILE),
-            config.HISTORICAL_LEARNING_CONFIG_PATH,
-        )
         self._capture_cache = {}
         self._capture_cache_ttl = config.CAPTURE_CACHE_TTL
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
@@ -1882,7 +1729,6 @@ class EatventureBot:
                 self.completion_detected_by = None
 
                 self.telegram.notify_new_level(self.total_levels_completed, time_spent)
-                self.historical_learning.record_completion(self.total_levels_completed, time_spent)
 
                 logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
                 logger.info("Waiting for unlock button after level transition")
@@ -1955,8 +1801,6 @@ class EatventureBot:
                 daemon=True,
             )
             self._new_level_monitor_thread.start()
-
-        self.historical_learning.start()
         
         try:
             while self.running:
@@ -1983,7 +1827,6 @@ class EatventureBot:
         self._new_level_monitor_stop.set()
         if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
             self._new_level_monitor_thread.join(timeout=1.0)
-        self.historical_learning.stop()
         if self.overlay:
             self.overlay.stop()
         logger.info("Bot stopped")
