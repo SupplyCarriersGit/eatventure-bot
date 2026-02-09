@@ -3,6 +3,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import threading
 
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ class AssetScanner:
         self.max_workers = max_workers or min(32, cpu_count + 4)
         self._template_cache = {}
         self._asset_index_cache = {}
+        self._cache_lock = threading.RLock()
 
     def scan(self, assets_dir, required_templates=None):
         assets_path = Path(assets_dir)
@@ -76,7 +78,7 @@ class AssetScanner:
                     template_files.append(indexed_path)
         else:
             template_files = list(indexed.values())
-        template_files = sorted(set(template_files))
+        template_files = sorted(set(template_files), key=lambda path: str(path).lower())
         return template_files
 
     def _index_assets_dir(self, assets_path):
@@ -86,9 +88,10 @@ class AssetScanner:
         except OSError:
             mtime = None
 
-        cached = self._asset_index_cache.get(assets_key)
-        if cached and cached["mtime"] == mtime:
-            return cached["index"]
+        with self._cache_lock:
+            cached = self._asset_index_cache.get(assets_key)
+            if cached and cached["mtime"] == mtime:
+                return cached["index"]
 
         indexed = {}
         for template_path in assets_path.rglob("*"):
@@ -98,7 +101,8 @@ class AssetScanner:
             indexed.setdefault(stem.lower(), template_path)
             indexed.setdefault(self._normalize_key(stem), template_path)
 
-        self._asset_index_cache[assets_key] = {"mtime": mtime, "index": indexed}
+        with self._cache_lock:
+            self._asset_index_cache[assets_key] = {"mtime": mtime, "index": indexed}
         return indexed
 
     def _load_template(self, template_file):
@@ -108,10 +112,13 @@ class AssetScanner:
         except OSError:
             mtime = None
 
-        cached = self._template_cache.get(str(template_file))
-        if cached and cached["mtime"] == mtime:
-            return template_name, cached["data"]
+        key = str(template_file)
+        with self._cache_lock:
+            cached = self._template_cache.get(key)
+            if cached and cached["mtime"] == mtime:
+                return template_name, cached["data"]
 
         template_img = self.image_matcher.load_template(template_file)
-        self._template_cache[str(template_file)] = {"mtime": mtime, "data": template_img}
+        with self._cache_lock:
+            self._template_cache[key] = {"mtime": mtime, "data": template_img}
         return template_name, template_img
