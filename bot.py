@@ -873,6 +873,9 @@ class EatventureBot:
         )
 
         for template_name, template, mask in self._iter_red_icon_templates():
+            if template.shape[0] > roi.shape[0] or template.shape[1] > roi.shape[1]:
+                continue
+
             icons = self.image_matcher.find_all_templates(
                 roi,
                 template,
@@ -1312,11 +1315,18 @@ class EatventureBot:
 
         def _detect_interrupt_assets(screenshot):
             threshold = max(0.0, min(1.0, float(getattr(config, "SCROLL_INTERRUPT_ASSET_THRESHOLD", 0.93))))
+            asset_state_map = {
+                "unlock": State.CHECK_UNLOCK,
+                "upgradeStation": State.SEARCH_UPGRADE_STATION,
+            }
             for asset_name in getattr(config, "SCROLL_INTERRUPT_ASSET_TEMPLATES", ()):
                 template_data = self.templates.get(asset_name)
                 if not template_data:
                     continue
                 template, mask = template_data
+                if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
+                    continue
+
                 found, confidence, _, _ = self.image_matcher.find_template(
                     screenshot,
                     template,
@@ -1325,8 +1335,12 @@ class EatventureBot:
                     template_name=f"{asset_name}-scroll-monitor",
                 )
                 if found:
-                    return asset_name, confidence
-            return None, 0.0
+                    if asset_name.startswith("box"):
+                        target_state = State.OPEN_BOXES
+                    else:
+                        target_state = asset_state_map.get(asset_name, State.FIND_RED_ICONS)
+                    return asset_name, confidence, target_state
+            return None, 0.0, None
 
         def monitor_assets():
             interval = max(0.002, float(getattr(config, "SCROLL_ASSET_SCAN_INTERVAL", 0.008)))
@@ -1374,14 +1388,15 @@ class EatventureBot:
                             return
 
                 if scan_counter % full_scan_every == 0:
-                    asset_name, confidence = _detect_interrupt_assets(screenshot)
-                    if asset_name is not None:
+                    asset_name, confidence, target_state = _detect_interrupt_assets(screenshot)
+                    if asset_name is not None and target_state is not None:
                         logger.info(
-                            "Detected interrupt asset '%s' (%.2f%% confidence)",
+                            "Detected interrupt asset '%s' (%.2f%% confidence) -> %s",
                             asset_name,
                             confidence * 100,
+                            target_state.name,
                         )
-                        _interrupt_to_main_cycle(State.FIND_RED_ICONS, f"Asset {asset_name} detected")
+                        _interrupt_to_main_cycle(target_state, f"Asset {asset_name} detected")
                         return
 
                 time.sleep(interval)

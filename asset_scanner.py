@@ -91,8 +91,8 @@ class AssetScanner:
             return cached["index"]
 
         indexed = {}
-        for template_path in assets_path.rglob("*.png"):
-            if not template_path.is_file():
+        for template_path in assets_path.rglob("*"):
+            if not template_path.is_file() or template_path.suffix.lower() != ".png":
                 continue
             stem = template_path.stem
             indexed.setdefault(stem.lower(), template_path)
