@@ -1276,6 +1276,16 @@ class EatventureBot:
             return (1, y)
 
         red_icons.sort(key=get_priority)
+
+        max_per_scan = max(1, int(getattr(config, "RED_ICON_MAX_PER_SCAN", 1)))
+        if len(red_icons) > max_per_scan:
+            logger.debug(
+                "Red icon queue limited from %s to %s for single-target interaction safety",
+                len(red_icons),
+                max_per_scan,
+            )
+            red_icons = red_icons[:max_per_scan]
+
         return red_icons
 
     def _build_scroll_segments(self, direction, distance_ratio=None):

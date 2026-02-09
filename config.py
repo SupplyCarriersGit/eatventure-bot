@@ -20,6 +20,10 @@ RED_ICON_VERIFY_TOLERANCE = 12
 RED_ICON_REFINE_RADIUS = 18
 RED_ICON_REFINE_THRESHOLD_DROP = 0.02
 RED_ICON_PRIORITY_TEMPLATE_LIMIT = 8
+# Process at most this many red icons per FIND_RED_ICONS scan.
+# Keeping this at 1 avoids stale multi-icon queues that can trigger
+# rapid cross-interactions between unrelated assets.
+RED_ICON_MAX_PER_SCAN = 1
 STATS_RED_ICON_THRESHOLD = 0.97
 SEARCH_INTERVAL = 0.2
 CLICK_DELAY = 0.05
