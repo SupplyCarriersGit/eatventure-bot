@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -60,17 +61,22 @@ class AssetScanner:
 
         return templates
 
+    def _normalize_key(self, name):
+        return re.sub(r"[^a-z0-9]+", "", name.lower())
+
     def _collect_template_files(self, assets_path, required_set):
         indexed = self._index_assets_dir(assets_path)
         if required_set:
             template_files = []
             for template_name in required_set:
                 indexed_path = indexed.get(template_name.lower())
+                if indexed_path is None:
+                    indexed_path = indexed.get(self._normalize_key(template_name))
                 if indexed_path is not None:
                     template_files.append(indexed_path)
         else:
             template_files = list(indexed.values())
-        template_files.sort()
+        template_files = sorted(set(template_files))
         return template_files
 
     def _index_assets_dir(self, assets_path):
@@ -85,11 +91,12 @@ class AssetScanner:
             return cached["index"]
 
         indexed = {}
-        with os.scandir(assets_path) as entries:
-            for entry in entries:
-                if not entry.is_file() or not entry.name.lower().endswith(".png"):
-                    continue
-                indexed[Path(entry.name).stem.lower()] = Path(entry.path)
+        for template_path in assets_path.rglob("*"):
+            if not template_path.is_file() or template_path.suffix.lower() != ".png":
+                continue
+            stem = template_path.stem
+            indexed.setdefault(stem.lower(), template_path)
+            indexed.setdefault(self._normalize_key(stem), template_path)
 
         self._asset_index_cache[assets_key] = {"mtime": mtime, "index": indexed}
         return indexed

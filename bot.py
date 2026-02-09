@@ -527,7 +527,7 @@ class EatventureBot:
         
         self.scroll_direction = 'down'
         self.scroll_count = 0
-        self.max_scroll_count = 5
+        self.max_scroll_count = max(1, int(getattr(config, "MAX_SCROLL_CYCLES", 5)))
         self.work_done = False
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
@@ -681,20 +681,30 @@ class EatventureBot:
 
         if direction == "up":
             logger.info("Red icon in forbidden zone → scrolling up to clear")
-            self.mouse_controller.drag(
-                config.SCROLL_END_POS[0], config.SCROLL_END_POS[1],
-                config.SCROLL_START_POS[0], config.SCROLL_START_POS[1],
-                duration=config.FORBIDDEN_ICON_SCROLL_DURATION,
-                relative=True,
-            )
+            segments = self._build_scroll_segments("up", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
+            seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
+            for from_x, from_y, to_x, to_y in segments:
+                self.mouse_controller.drag(
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    duration=seg_duration,
+                    relative=True,
+                )
         else:
             logger.info("Red icon in forbidden zone → scrolling down to clear")
-            self.mouse_controller.drag(
-                config.SCROLL_START_POS[0], config.SCROLL_START_POS[1],
-                config.SCROLL_END_POS[0], config.SCROLL_END_POS[1],
-                duration=config.FORBIDDEN_ICON_SCROLL_DURATION,
-                relative=True,
-            )
+            segments = self._build_scroll_segments("down", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
+            seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
+            for from_x, from_y, to_x, to_y in segments:
+                self.mouse_controller.drag(
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    duration=seg_duration,
+                    relative=True,
+                )
 
         self._click_idle()
         if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
@@ -863,6 +873,9 @@ class EatventureBot:
         )
 
         for template_name, template, mask in self._iter_red_icon_templates():
+            if template.shape[0] > roi.shape[0] or template.shape[1] > roi.shape[1]:
+                continue
+
             icons = self.image_matcher.find_all_templates(
                 roi,
                 template,
@@ -1265,42 +1278,84 @@ class EatventureBot:
         red_icons.sort(key=get_priority)
         return red_icons
 
-    def _build_scroll_segments(self, direction):
+    def _build_scroll_segments(self, direction, distance_ratio=None):
         segments = max(1, int(getattr(config, "SCROLL_SEGMENTS", 1)))
+        scroll_ratio = float(getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)) if distance_ratio is None else float(distance_ratio)
+        scroll_ratio = max(0.1, min(1.0, scroll_ratio))
+
         if direction == "up":
-            start_x, start_y = config.SCROLL_END_POS
-            end_x, end_y = config.SCROLL_START_POS
+            full_start_x, full_start_y = config.SCROLL_END_POS
+            full_end_x, full_end_y = config.SCROLL_START_POS
         else:
-            start_x, start_y = config.SCROLL_START_POS
-            end_x, end_y = config.SCROLL_END_POS
+            full_start_x, full_start_y = config.SCROLL_START_POS
+            full_end_x, full_end_y = config.SCROLL_END_POS
+
+        end_x = int(full_start_x + (full_end_x - full_start_x) * scroll_ratio)
+        end_y = int(full_start_y + (full_end_y - full_start_y) * scroll_ratio)
 
         points = []
         for i in range(segments):
             t1 = i / segments
             t2 = (i + 1) / segments
-            fx = int(start_x + (end_x - start_x) * t1)
-            fy = int(start_y + (end_y - start_y) * t1)
-            tx = int(start_x + (end_x - start_x) * t2)
-            ty = int(start_y + (end_y - start_y) * t2)
+            fx = int(full_start_x + (end_x - full_start_x) * t1)
+            fy = int(full_start_y + (end_y - full_start_y) * t1)
+            tx = int(full_start_x + (end_x - full_start_x) * t2)
+            ty = int(full_start_y + (end_y - full_start_y) * t2)
             points.append((fx, fy, tx, ty))
         return points
 
-    def _scroll_with_background_asset_detection(self, direction, scroll_duration, scan_for_red_icons=False):
+    def _scroll_with_background_asset_detection(self, direction, scroll_duration, scan_for_red_icons=False, distance_ratio=None):
         stop_event = threading.Event()
         state_holder = {"state": None}
 
+        def _interrupt_to_main_cycle(new_state, reason):
+            logger.info("%s during scroll; interrupting scroll", reason)
+            state_holder["state"] = new_state
+            stop_event.set()
+
+        def _detect_interrupt_assets(screenshot):
+            threshold = max(0.0, min(1.0, float(getattr(config, "SCROLL_INTERRUPT_ASSET_THRESHOLD", 0.93))))
+            asset_state_map = {
+                "unlock": State.CHECK_UNLOCK,
+                "upgradeStation": State.SEARCH_UPGRADE_STATION,
+            }
+            for asset_name in getattr(config, "SCROLL_INTERRUPT_ASSET_TEMPLATES", ()):
+                template_data = self.templates.get(asset_name)
+                if not template_data:
+                    continue
+                template, mask = template_data
+                if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
+                    continue
+
+                found, confidence, _, _ = self.image_matcher.find_template(
+                    screenshot,
+                    template,
+                    mask=mask,
+                    threshold=threshold,
+                    template_name=f"{asset_name}-scroll-monitor",
+                )
+                if found:
+                    if asset_name.startswith("box"):
+                        target_state = State.OPEN_BOXES
+                    else:
+                        target_state = asset_state_map.get(asset_name, State.FIND_RED_ICONS)
+                    return asset_name, confidence, target_state
+            return None, 0.0, None
+
         def monitor_assets():
             interval = max(0.002, float(getattr(config, "SCROLL_ASSET_SCAN_INTERVAL", 0.008)))
+            full_scan_every = max(1, int(getattr(config, "SCROLL_ASSET_FULL_SCAN_EVERY", 2)))
+            scan_counter = 0
             while not stop_event.is_set():
                 screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+                scan_counter += 1
 
                 if self._should_interrupt_for_new_level(
                     screenshot=screenshot,
                     max_y=config.MAX_SEARCH_Y,
                     force=True,
                 ):
-                    state_holder["state"] = State.TRANSITION_LEVEL
-                    stop_event.set()
+                    _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level detected")
                     return
 
                 if scan_for_red_icons:
@@ -1312,7 +1367,7 @@ class EatventureBot:
                     scroll_icons = self._detect_red_icons_in_view(
                         screenshot,
                         max_y=config.MAX_SEARCH_Y,
-                        min_distance=max(10, int(getattr(config, "SCROLL_RED_ICON_MIN_DISTANCE", 56))),
+                        min_distance=max(8, int(getattr(config, "SCROLL_RED_ICON_MIN_DISTANCE", 56))),
                         threshold_override=scroll_threshold,
                         min_matches_override=max(1, int(getattr(config, "SCROLL_RED_ICON_MIN_MATCHES", config.RED_ICON_MIN_MATCHES))),
                     )
@@ -1328,17 +1383,28 @@ class EatventureBot:
                             self.red_icon_cycle_count = 0
                             self.no_red_icons_found = False
                             self.work_done = True
-                            logger.info(f"✓ {len(self.red_icons)} red icons detected during active scroll; interrupting scroll")
-                            state_holder["state"] = State.CLICK_RED_ICON
-                            stop_event.set()
+                            logger.info(f"✓ {len(self.red_icons)} red icons detected during active scroll")
+                            _interrupt_to_main_cycle(State.CLICK_RED_ICON, "Red icon detected")
                             return
+
+                if scan_counter % full_scan_every == 0:
+                    asset_name, confidence, target_state = _detect_interrupt_assets(screenshot)
+                    if asset_name is not None and target_state is not None:
+                        logger.info(
+                            "Detected interrupt asset '%s' (%.2f%% confidence) -> %s",
+                            asset_name,
+                            confidence * 100,
+                            target_state.name,
+                        )
+                        _interrupt_to_main_cycle(target_state, f"Asset {asset_name} detected")
+                        return
 
                 time.sleep(interval)
 
         monitor_thread = threading.Thread(target=monitor_assets, daemon=True)
         monitor_thread.start()
 
-        segments = self._build_scroll_segments(direction)
+        segments = self._build_scroll_segments(direction, distance_ratio=distance_ratio)
         segment_duration = max(0.001, scroll_duration / max(1, len(segments)))
         segment_settle_delay = max(0.0, float(getattr(config, "SCROLL_SEGMENT_SETTLE_DELAY", 0.0)))
 
