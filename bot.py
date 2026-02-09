@@ -394,8 +394,7 @@ class HistoricalLearner:
             records = list(self._records)
             total_completions = int(self._total_completions)
 
-        now = time.monotonic()
-        if self.apply_cooldown > 0 and now - self._last_apply_time < self.apply_cooldown:
+        if self._is_apply_cooldown_active():
             self._persist()
             return
 
@@ -405,6 +404,12 @@ class HistoricalLearner:
             self._apply_profile_if_improved(profile, pair_records, f"pair-{self.pair_window}")
             self._last_pair_processed = total_completions // self.pair_window
 
+        # Re-check cooldown after pair application to prevent back-to-back
+        # profile rewrites within the same learning pass.
+        if self._is_apply_cooldown_active():
+            self._persist()
+            return
+
         if total_completions >= self.batch_window and total_completions // self.batch_window > self._last_batch_processed:
             batch_records = records[-self.batch_window:]
             profile = self._build_profile(batch_records)
@@ -412,6 +417,11 @@ class HistoricalLearner:
             self._last_batch_processed = total_completions // self.batch_window
 
         self._persist()
+
+    def _is_apply_cooldown_active(self):
+        if self.apply_cooldown <= 0:
+            return False
+        return (time.monotonic() - self._last_apply_time) < self.apply_cooldown
 
     def _build_profile(self, records):
         valid = [r for r in records if r.get("time_spent", 0) > 0 and r.get("behavior")]
