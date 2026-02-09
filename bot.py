@@ -326,6 +326,10 @@ class HistoricalLearner:
         self.batch_window = max(2, int(getattr(config, "AI_LEARNING_BATCH_WINDOW", 7)))
         self.ema_alpha = max(0.01, min(0.8, float(getattr(config, "AI_LEARNING_EMA_ALPHA", 0.18))))
         self.auto_write_config = bool(getattr(config, "AI_LEARNING_AUTOWRITE_CONFIG", False))
+        self.top_k = max(1, int(getattr(config, "AI_LEARNING_PROFILE_BLEND_TOP_K", 3)))
+        self.min_improvement_ratio = max(0.0, float(getattr(config, "AI_LEARNING_MIN_IMPROVEMENT_RATIO", 0.03)))
+        self.apply_cooldown = max(0.0, float(getattr(config, "AI_LEARNING_APPLY_COOLDOWN", 1.2)))
+        self._last_apply_time = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -383,26 +387,67 @@ class HistoricalLearner:
                 self._run_learning_cycle()
             except Exception:
                 logger.exception("Historical learner cycle failed; continuing")
-            time.sleep(self.interval)
+            time.sleep(max(0.01, self.interval))
 
     def _run_learning_cycle(self):
         with self._lock:
             records = list(self._records)
             total_completions = int(self._total_completions)
 
+        now = time.monotonic()
+        if self.apply_cooldown > 0 and now - self._last_apply_time < self.apply_cooldown:
+            self._persist()
+            return
+
         if total_completions >= self.pair_window and total_completions // self.pair_window > self._last_pair_processed:
             pair_records = records[-self.pair_window:]
-            best = min(pair_records, key=lambda item: item.get("time_spent", float("inf")))
-            self._apply_best_record(best, f"pair-{self.pair_window}")
+            profile = self._build_profile(pair_records)
+            self._apply_profile_if_improved(profile, pair_records, f"pair-{self.pair_window}")
             self._last_pair_processed = total_completions // self.pair_window
 
         if total_completions >= self.batch_window and total_completions // self.batch_window > self._last_batch_processed:
             batch_records = records[-self.batch_window:]
-            best = min(batch_records, key=lambda item: item.get("time_spent", float("inf")))
-            self._apply_best_record(best, f"batch-{self.batch_window}")
+            profile = self._build_profile(batch_records)
+            self._apply_profile_if_improved(profile, batch_records, f"batch-{self.batch_window}")
             self._last_batch_processed = total_completions // self.batch_window
 
         self._persist()
+
+    def _build_profile(self, records):
+        valid = [r for r in records if r.get("time_spent", 0) > 0 and r.get("behavior")]
+        if not valid:
+            return None
+        ranked = sorted(valid, key=lambda item: item.get("time_spent", float("inf")))
+        top = ranked[: self.top_k]
+        profile = {"click_delay": 0.0, "move_delay": 0.0, "upgrade_click_interval": 0.0, "search_interval": 0.0}
+        for record in top:
+            behavior = record.get("behavior") or {}
+            for key in profile:
+                profile[key] += float(behavior.get(key, 0.0))
+        count = float(len(top))
+        return {key: value / count for key, value in profile.items()}
+
+    def _apply_profile_if_improved(self, profile, records, label):
+        if not profile or not records:
+            return
+        durations = [r.get("time_spent", 0.0) for r in records if r.get("time_spent", 0.0) > 0]
+        if not durations:
+            return
+        best_time = min(durations)
+        avg_time = sum(durations) / len(durations)
+        if avg_time <= 0:
+            return
+        improvement_ratio = (avg_time - best_time) / avg_time
+        if improvement_ratio < self.min_improvement_ratio:
+            logger.debug(
+                "Historical learner (%s) skipped profile apply; improvement %.2f%% below %.2f%%",
+                label,
+                improvement_ratio * 100,
+                self.min_improvement_ratio * 100,
+            )
+            return
+        self._apply_best_record({"behavior": profile, "time_spent": best_time}, label)
+        self._last_apply_time = time.monotonic()
 
     def _ema(self, current, target):
         return (1 - self.ema_alpha) * current + self.ema_alpha * target
@@ -518,6 +563,8 @@ class EatventureBot:
         self.available_red_icon_templates = self._build_available_red_icon_templates()
         self._red_template_hit_counts = {}
         self._red_template_priority = []
+        self._red_template_last_seen = {}
+        self._red_template_decay_window = max(1.0, float(getattr(config, "RED_ICON_STABILITY_CACHE_TTL", 0.22)))
         self.running = False
         self.red_icon_cycle_count = 0
         self.red_icons = []
@@ -568,6 +615,8 @@ class EatventureBot:
         self._last_upgrade_station_pos = None
         self._last_new_level_override_time = 0.0
         self._last_idle_click_time = 0.0
+        self._state_last_run_at = {}
+        self._recent_red_icon_history = []
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -742,6 +791,59 @@ class EatventureBot:
             return State.TRANSITION_LEVEL
 
         return None
+
+    def _enforce_state_min_interval(self):
+        state = self.state_machine.get_state_name()
+        per_state = getattr(config, "STATE_MIN_INTERVALS", {})
+        min_interval = float(per_state.get(state, getattr(config, "STATE_MIN_INTERVAL_DEFAULT", 0.0)))
+        if min_interval <= 0:
+            self._state_last_run_at[state] = time.monotonic()
+            return
+
+        now = time.monotonic()
+        last_run = self._state_last_run_at.get(state, 0.0)
+        wait_time = (last_run + min_interval) - now
+        if wait_time > 0 and self._sleep_with_interrupt(wait_time):
+            self._state_last_run_at[state] = time.monotonic()
+            return
+        self._state_last_run_at[state] = time.monotonic()
+
+    def _stable_red_icons(self, red_icons):
+        if not red_icons:
+            return []
+
+        ttl = max(0.01, float(getattr(config, "RED_ICON_STABILITY_CACHE_TTL", 0.22)))
+        radius = max(4, int(getattr(config, "RED_ICON_STABILITY_RADIUS", 14)))
+        min_hits = max(1, int(getattr(config, "RED_ICON_STABILITY_MIN_HITS", 2)))
+        max_history = max(2, int(getattr(config, "RED_ICON_STABILITY_MAX_HISTORY", 10)))
+        now = time.monotonic()
+
+        history = []
+        for entry in getattr(self, "_recent_red_icon_history", []):
+            if now - entry.get("timestamp", 0.0) <= ttl:
+                history.append(entry)
+
+        current = {"timestamp": now, "icons": list(red_icons)}
+        history.append(current)
+        if len(history) > max_history:
+            history = history[-max_history:]
+        self._recent_red_icon_history = history
+
+        stable = []
+        for conf, x, y in red_icons:
+            hits = 0
+            best_conf = conf
+            for entry in history:
+                for h_conf, hx, hy in entry["icons"]:
+                    if abs(hx - x) <= radius and abs(hy - y) <= radius:
+                        hits += 1
+                        if h_conf > best_conf:
+                            best_conf = h_conf
+                        break
+            if hits >= min_hits:
+                stable.append((best_conf, x, y))
+
+        return stable or red_icons
 
     def _click_new_level_override(self, source=None):
         now = time.monotonic()
@@ -1461,6 +1563,7 @@ class EatventureBot:
             return State.TRANSITION_LEVEL
 
         red_icons = self._detect_red_icons_in_view(limited_screenshot, max_y=config.MAX_SEARCH_Y)
+        red_icons = self._stable_red_icons(red_icons)
         self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in red_icons])
         if not red_icons:
             return None
@@ -1516,16 +1619,23 @@ class EatventureBot:
         if not hit_counts:
             return
 
+        now = time.monotonic()
         for template_name, count in hit_counts.items():
             self._red_template_hit_counts[template_name] = self._red_template_hit_counts.get(template_name, 0) + count
+            self._red_template_last_seen[template_name] = now
 
-        sorted_hits = sorted(
-            self._red_template_hit_counts.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )
+        decay_window = max(1.0, float(getattr(config, "RED_ICON_STABILITY_CACHE_TTL", self._red_template_decay_window)))
+        scored = []
+        for name, count in self._red_template_hit_counts.items():
+            last_seen = self._red_template_last_seen.get(name, now)
+            age = max(0.0, now - last_seen)
+            freshness = max(0.1, 1.0 - min(1.0, age / decay_window))
+            score = count * freshness
+            scored.append((name, score))
+
+        scored.sort(key=lambda item: item[1], reverse=True)
         limit = max(1, getattr(config, "RED_ICON_PRIORITY_TEMPLATE_LIMIT", 8))
-        self._red_template_priority = [name for name, _ in sorted_hits[:limit]]
+        self._red_template_priority = [name for name, _ in scored[:limit]]
 
     def _build_available_red_icon_templates(self):
         available = []
@@ -1600,6 +1710,7 @@ class EatventureBot:
             screenshot,
             max_y=config.MAX_SEARCH_Y,
         )
+        self.red_icons = self._stable_red_icons(self.red_icons)
 
         self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in self.red_icons])
 
@@ -2231,6 +2342,7 @@ class EatventureBot:
     def step(self):
         self._clear_capture_cache()
         self._apply_tuning()
+        self._enforce_state_min_interval()
         self.state_machine.update()
     
     def stop(self):
