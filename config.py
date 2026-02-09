@@ -153,6 +153,22 @@ SCROLL_INTERRUPT_ASSET_TEMPLATES = (
     "box3",
     "box4",
     "box5",
+    "RedIcon",
+    "RedIcon2",
+    "RedIcon3",
+    "RedIcon4",
+    "RedIcon5",
+    "RedIcon6",
+    "RedIcon7",
+    "RedIcon8",
+    "RedIcon9",
+    "RedIcon10",
+    "RedIcon11",
+    "RedIcon12",
+    "RedIcon13",
+    "RedIcon14",
+    "RedIcon15",
+    "RedIconNoBG",
 )
 UPGRADE_SEARCH_INTERVAL = 0.02
 UPGRADE_CHECK_INTERVAL = 0.04
