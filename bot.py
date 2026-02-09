@@ -1415,15 +1415,33 @@ class EatventureBot:
         end_x = int(full_start_x + (full_end_x - full_start_x) * scroll_ratio)
         end_y = int(full_start_y + (full_end_y - full_start_y) * scroll_ratio)
 
+        min_segment_distance = max(1, int(getattr(config, "SCROLL_MIN_SEGMENT_DISTANCE", 1)))
+
         points = []
+        pending_start = (full_start_x, full_start_y)
+
         for i in range(segments):
-            t1 = i / segments
             t2 = (i + 1) / segments
-            fx = int(full_start_x + (end_x - full_start_x) * t1)
-            fy = int(full_start_y + (end_y - full_start_y) * t1)
             tx = int(full_start_x + (end_x - full_start_x) * t2)
             ty = int(full_start_y + (end_y - full_start_y) * t2)
+
+            fx, fy = pending_start
+            if abs(tx - fx) < min_segment_distance and abs(ty - fy) < min_segment_distance:
+                continue
+
             points.append((fx, fy, tx, ty))
+            pending_start = (tx, ty)
+
+        if pending_start != (end_x, end_y):
+            if points:
+                last_fx, last_fy, _, _ = points[-1]
+                points[-1] = (last_fx, last_fy, end_x, end_y)
+            else:
+                points.append((full_start_x, full_start_y, end_x, end_y))
+
+        if not points:
+            points.append((full_start_x, full_start_y, end_x, end_y))
+
         return points
 
     def _scroll_with_background_asset_detection(self, direction, scroll_duration, scan_for_red_icons=False, distance_ratio=None):
