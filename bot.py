@@ -627,6 +627,7 @@ class EatventureBot:
         self._last_idle_click_time = 0.0
         self._state_last_run_at = {}
         self._recent_red_icon_history = []
+        self._no_red_scroll_cycle_pending = False
 
         self.forbidden_zones = [
             (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
@@ -772,6 +773,12 @@ class EatventureBot:
         return True
 
     def resolve_priority_state(self, current_state):
+        if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
+            logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
+            self._no_red_scroll_cycle_pending = False
+            self.no_red_icons_found = True
+            return State.SCROLL
+
         interrupt = self._consume_new_level_interrupt()
         if interrupt:
             logger.info(
@@ -1619,6 +1626,8 @@ class EatventureBot:
 
     def _scan_and_click_non_red_assets(self, screenshot):
         clicked_targets = 0
+        clicked_upgrade_station = False
+        clicked_box = False
 
         upgrade_template = self.templates.get("upgradeStation")
         if upgrade_template is not None:
@@ -1648,6 +1657,7 @@ class EatventureBot:
                     )
                     if self.mouse_controller.click(x, y, relative=True):
                         clicked_targets += 1
+                        clicked_upgrade_station = True
                         self.upgrade_found_in_cycle = True
                         self.vision_optimizer.update_upgrade_station_confidence(confidence)
 
@@ -1681,6 +1691,16 @@ class EatventureBot:
             )
             if self.mouse_controller.click(x, y, relative=True):
                 clicked_targets += 1
+                clicked_box = True
+
+        if clicked_targets > 0:
+            self._no_red_scroll_cycle_pending = True
+            logger.info(
+                "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; scheduling no-red scroll cycle",
+                clicked_targets,
+                clicked_upgrade_station,
+                clicked_box,
+            )
 
         return clicked_targets
 
