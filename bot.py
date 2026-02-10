@@ -781,6 +781,9 @@ class EatventureBot:
                 interrupt["x"],
                 interrupt["y"],
             )
+            if self._no_red_scroll_cycle_pending:
+                logger.info("Clearing deferred no-red scroll due to pending level transition interrupt")
+                self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
 
@@ -804,6 +807,9 @@ class EatventureBot:
                 x,
                 y,
             )
+            if self._no_red_scroll_cycle_pending:
+                logger.info("Clearing deferred no-red scroll due to immediate level transition")
+                self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=source)
             return State.TRANSITION_LEVEL
 
