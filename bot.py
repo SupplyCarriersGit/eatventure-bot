@@ -1617,6 +1617,73 @@ class EatventureBot:
         scanner = AssetScanner(self.image_matcher)
         return scanner.scan(config.ASSETS_DIR, required_templates=required_templates)
 
+    def _scan_and_click_non_red_assets(self, screenshot):
+        clicked_targets = 0
+
+        upgrade_template = self.templates.get("upgradeStation")
+        if upgrade_template is not None:
+            template, mask = upgrade_template
+            upgrade_threshold = (
+                self.vision_optimizer.upgrade_station_threshold
+                if self.vision_optimizer.enabled
+                else config.UPGRADE_STATION_THRESHOLD
+            )
+            found, confidence, x, y = self.image_matcher.find_template(
+                screenshot,
+                template,
+                mask=mask,
+                threshold=upgrade_threshold,
+                template_name="upgradeStation-no-red-fallback",
+                check_color=config.UPGRADE_STATION_COLOR_CHECK,
+            )
+            if found:
+                if self.mouse_controller.is_in_forbidden_zone(x, y):
+                    logger.debug("Fallback scan: upgrade station in forbidden zone, skipping")
+                else:
+                    logger.info(
+                        "Fallback scan: clicking upgrade station at (%s, %s) [%.2f%%]",
+                        x,
+                        y,
+                        confidence * 100,
+                    )
+                    if self.mouse_controller.click(x, y, relative=True):
+                        clicked_targets += 1
+                        self.upgrade_found_in_cycle = True
+                        self.vision_optimizer.update_upgrade_station_confidence(confidence)
+
+        for box_name in ("box1", "box2", "box3", "box4", "box5"):
+            box_template = self.templates.get(box_name)
+            if box_template is None:
+                continue
+
+            template, mask = box_template
+            found, confidence, x, y = self.image_matcher.find_template(
+                screenshot,
+                template,
+                mask=mask,
+                threshold=config.BOX_THRESHOLD,
+                template_name=f"{box_name}-no-red-fallback",
+            )
+
+            if not found:
+                continue
+
+            if self.mouse_controller.is_in_forbidden_zone(x, y):
+                logger.debug("Fallback scan: %s in forbidden zone, skipping", box_name)
+                continue
+
+            logger.info(
+                "Fallback scan: clicking %s at (%s, %s) [%.2f%%]",
+                box_name,
+                x,
+                y,
+                confidence * 100,
+            )
+            if self.mouse_controller.click(x, y, relative=True):
+                clicked_targets += 1
+
+        return clicked_targets
+
 
     def _iter_red_icon_templates(self):
         if not self.available_red_icon_templates:
@@ -1759,7 +1826,16 @@ class EatventureBot:
             return State.CHECK_NEW_LEVEL
         
         if not self.red_icons:
-            logger.info("No valid red icons after scan; scrolling to search")
+            clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
+            if clicked_targets > 0:
+                logger.info(
+                    "No red icons detected; fallback clicked %s non-red assets. Returning to main cycle.",
+                    clicked_targets,
+                )
+                self.no_red_icons_found = False
+                return State.FIND_RED_ICONS
+
+            logger.info("No valid red icons after scan; no fallback assets found, scrolling to search")
             self.no_red_icons_found = True
             return State.SCROLL
         else:
@@ -1768,7 +1844,16 @@ class EatventureBot:
                 logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed")
             
             if not filtered_icons:
-                logger.info("No valid red icons after filtering; scrolling to search")
+                clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
+                if clicked_targets > 0:
+                    logger.info(
+                        "Filtered red icons to zero; fallback clicked %s non-red assets. Returning to main cycle.",
+                        clicked_targets,
+                    )
+                    self.no_red_icons_found = False
+                    return State.FIND_RED_ICONS
+
+                logger.info("No valid red icons after filtering; no fallback assets found, scrolling to search")
                 self.no_red_icons_found = True
                 return State.SCROLL
             
