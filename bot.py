@@ -787,8 +787,17 @@ class EatventureBot:
                 interrupt["x"],
                 interrupt["y"],
             )
+            if self._no_red_scroll_cycle_pending:
+                logger.info("Clearing deferred no-red scroll due to pending level transition interrupt")
+                self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
+
+        if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
+            logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
+            self._no_red_scroll_cycle_pending = False
+            self.no_red_icons_found = True
+            return State.SCROLL
 
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
@@ -804,6 +813,9 @@ class EatventureBot:
                 x,
                 y,
             )
+            if self._no_red_scroll_cycle_pending:
+                logger.info("Clearing deferred no-red scroll due to immediate level transition")
+                self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=source)
             return State.TRANSITION_LEVEL
 
