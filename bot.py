@@ -77,12 +77,14 @@ class VisionOptimizer:
         self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
         self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
         self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
+        self.box_threshold = config.BOX_THRESHOLD
         self.persistence = persistence
         self._red_icon_miss_count = 0
         self._new_level_miss_count = 0
         self._new_level_red_icon_miss_count = 0
         self._upgrade_station_miss_count = 0
         self._stats_upgrade_miss_count = 0
+        self._box_miss_count = 0
 
     def _ema(self, current, new_value, alpha=None):
         blend = self.alpha if alpha is None else alpha
@@ -185,6 +187,21 @@ class VisionOptimizer:
         )
         self._persist()
 
+    def update_box_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        self._box_miss_count = 0
+        target = max(
+            0.85,
+            min(confidence, 0.995),
+        )
+        self.box_threshold = self._ema(
+            self.box_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
     def update_new_level_miss(self):
         if not self.enabled:
             return
@@ -253,6 +270,17 @@ class VisionOptimizer:
         )
         self._persist()
 
+    def update_box_miss(self):
+        if not self.enabled:
+            return
+        self._box_miss_count += 1
+        if self._box_miss_count < 3:
+            return
+        self._box_miss_count = 0
+        target = max(0.85, self.box_threshold - 0.005)
+        self.box_threshold = self._ema(self.box_threshold, target, self.alpha_max)
+        self._persist()
+
     def apply_persisted_state(self, state):
         if not state:
             return
@@ -266,6 +294,8 @@ class VisionOptimizer:
             self.upgrade_station_threshold = float(state["upgrade_station_threshold"])
         if "stats_upgrade_threshold" in state:
             self.stats_upgrade_threshold = float(state["stats_upgrade_threshold"])
+        if "box_threshold" in state:
+            self.box_threshold = float(state["box_threshold"])
 
     def _persist(self):
         if not self.persistence:
@@ -276,6 +306,7 @@ class VisionOptimizer:
             "new_level_red_icon_threshold": self.new_level_red_icon_threshold,
             "upgrade_station_threshold": self.upgrade_station_threshold,
             "stats_upgrade_threshold": self.stats_upgrade_threshold,
+            "box_threshold": self.box_threshold,
         }
         self.persistence.save({key: float(value) for key, value in state.items()})
 
@@ -1479,6 +1510,9 @@ class EatventureBot:
                 "upgradeStation": State.SEARCH_UPGRADE_STATION,
             }
             for asset_name in getattr(config, "SCROLL_INTERRUPT_ASSET_TEMPLATES", ()):
+                if asset_name.startswith("RedIcon"): # Skip red icons in background thread
+                    continue
+
                 template_data = self.templates.get(asset_name)
                 if not template_data:
                     continue
@@ -1517,35 +1551,6 @@ class EatventureBot:
                     _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level detected")
                     return
 
-                if scan_for_red_icons:
-                    scroll_threshold = max(
-                        0.0,
-                        (self.vision_optimizer.red_icon_threshold if self.vision_optimizer.enabled else config.RED_ICON_THRESHOLD)
-                        - float(getattr(config, "SCROLL_RED_ICON_THRESHOLD_DROP", 0.0)),
-                    )
-                    scroll_icons = self._detect_red_icons_in_view(
-                        screenshot,
-                        max_y=config.MAX_SEARCH_Y,
-                        min_distance=max(8, int(getattr(config, "SCROLL_RED_ICON_MIN_DISTANCE", 56))),
-                        threshold_override=scroll_threshold,
-                        min_matches_override=max(1, int(getattr(config, "SCROLL_RED_ICON_MIN_MATCHES", config.RED_ICON_MIN_MATCHES))),
-                    )
-                    self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in scroll_icons])
-
-                    if scroll_icons:
-                        filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(scroll_icons)
-                        if forbidden_zone_count > 0:
-                            logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed during scroll")
-                        if filtered_icons:
-                            self.red_icons = self._prioritize_red_icons(filtered_icons)
-                            self.current_red_icon_index = 0
-                            self.red_icon_cycle_count = 0
-                            self.no_red_icons_found = False
-                            self.work_done = True
-                            logger.info(f"✓ {len(self.red_icons)} red icons detected during active scroll")
-                            _interrupt_to_main_cycle(State.CLICK_RED_ICON, "Red icon detected")
-                            return
-
                 if scan_counter % full_scan_every == 0:
                     asset_name, confidence, target_state = _detect_interrupt_assets(screenshot)
                     if asset_name is not None and target_state is not None:
@@ -1580,6 +1585,37 @@ class EatventureBot:
             )
             if segment_settle_delay > 0:
                 time.sleep(segment_settle_delay)
+            
+            # Synchronous Red Icon Scan (Step-Scan)
+            if scan_for_red_icons:
+                screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+                scroll_threshold = max(
+                    0.0,
+                    (self.vision_optimizer.red_icon_threshold if self.vision_optimizer.enabled else config.RED_ICON_THRESHOLD)
+                    - float(getattr(config, "SCROLL_RED_ICON_THRESHOLD_DROP", 0.04)),
+                )
+                scroll_icons = self._detect_red_icons_in_view(
+                    screenshot,
+                    max_y=config.MAX_SEARCH_Y,
+                    min_distance=max(8, int(getattr(config, "SCROLL_RED_ICON_MIN_DISTANCE", 20))),
+                    threshold_override=scroll_threshold,
+                    min_matches_override=max(1, int(getattr(config, "SCROLL_RED_ICON_MIN_MATCHES", 1))),
+                )
+                
+                if scroll_icons:
+                    filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(scroll_icons)
+                    if forbidden_zone_count > 0:
+                        logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed during scroll")
+                    if filtered_icons:
+                        self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in scroll_icons])
+                        self.red_icons = self._prioritize_red_icons(filtered_icons)
+                        self.current_red_icon_index = 0
+                        self.red_icon_cycle_count = 0
+                        self.no_red_icons_found = False
+                        self.work_done = True
+                        logger.info(f"✓ {len(self.red_icons)} red icons detected during active scroll segment")
+                        _interrupt_to_main_cycle(State.CLICK_RED_ICON, "Red icon detected (Step-Scan)")
+                        break
 
         stop_event.set()
         monitor_thread.join(timeout=0.2)
@@ -1679,15 +1715,21 @@ class EatventureBot:
                 continue
 
             template, mask = box_template
+            box_threshold = (
+                self.vision_optimizer.box_threshold
+                if self.vision_optimizer.enabled
+                else config.BOX_THRESHOLD
+            )
             found, confidence, x, y = self.image_matcher.find_template(
                 screenshot,
                 template,
                 mask=mask,
-                threshold=config.BOX_THRESHOLD,
+                threshold=box_threshold,
                 template_name=f"{box_name}-no-red-fallback",
             )
 
             if not found:
+                self.vision_optimizer.update_box_miss()
                 continue
 
             if self.mouse_controller.is_in_forbidden_zone(x, y):
@@ -1704,6 +1746,7 @@ class EatventureBot:
             if self.mouse_controller.click(x, y, relative=True):
                 clicked_targets += 1
                 clicked_box = True
+                self.vision_optimizer.update_box_confidence(confidence)
 
         if clicked_targets > 0:
             self._no_red_scroll_cycle_pending = True
@@ -1861,11 +1904,11 @@ class EatventureBot:
             clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
             if clicked_targets > 0:
                 logger.info(
-                    "No red icons detected; fallback clicked %s non-red assets. Returning to main cycle.",
+                    "No red icons detected; fallback clicked %s non-red assets. Proceeding to no-icon scrolling cycle.",
                     clicked_targets,
                 )
-                self.no_red_icons_found = False
-                return State.FIND_RED_ICONS
+                self.no_red_icons_found = True
+                return State.SCROLL
 
             logger.info("No valid red icons after scan; no fallback assets found, scrolling to search")
             self.no_red_icons_found = True
@@ -1879,11 +1922,11 @@ class EatventureBot:
                 clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
                 if clicked_targets > 0:
                     logger.info(
-                        "Filtered red icons to zero; fallback clicked %s non-red assets. Returning to main cycle.",
+                        "Filtered red icons to zero; fallback clicked %s non-red assets. Proceeding to no-icon scrolling cycle.",
                         clicked_targets,
                     )
-                    self.no_red_icons_found = False
-                    return State.FIND_RED_ICONS
+                    self.no_red_icons_found = True
+                    return State.SCROLL
 
                 logger.info("No valid red icons after filtering; no fallback assets found, scrolling to search")
                 self.no_red_icons_found = True
@@ -2232,9 +2275,14 @@ class EatventureBot:
         for box_name in box_names:
             if box_name in self.templates:
                 template, mask = self.templates[box_name]
+                box_threshold = (
+                    self.vision_optimizer.box_threshold
+                    if self.vision_optimizer.enabled
+                    else config.BOX_THRESHOLD
+                )
                 found, confidence, x, y = self.image_matcher.find_template(
                     limited_screenshot, template, mask=mask,
-                    threshold=config.BOX_THRESHOLD, template_name=box_name
+                    threshold=box_threshold, template_name=box_name
                 )
                 
                 if found:
@@ -2243,6 +2291,9 @@ class EatventureBot:
                     else:
                         self.mouse_controller.click(x, y, relative=True)
                         boxes_found += 1
+                        self.vision_optimizer.update_box_confidence(confidence)
+                else:
+                    self.vision_optimizer.update_box_miss()
         
         if self._should_interrupt_for_new_level(
             max_y=config.MAX_SEARCH_Y,
