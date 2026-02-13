@@ -347,7 +347,7 @@ class MouseController:
             time.sleep(self.click_delay)
             return True
     
-    def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True):
+    def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True, interrupt_check=None):
         with self._mouse_action_lock:
             if relative:
                 win_x, win_y = self.get_window_position()
@@ -384,7 +384,12 @@ class MouseController:
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
             duration = max(duration, 0.001)
             start_time = time.monotonic()
+            interrupted = False
             for i in range(steps + 1):
+                if interrupt_check and interrupt_check():
+                    logger.info("Drag interrupted by callback")
+                    interrupted = True
+                    break
                 t = i / steps
                 current_x = int(screen_from_x + (screen_to_x - screen_from_x) * t)
                 current_y = int(screen_from_y + (screen_to_y - screen_from_y) * t)
@@ -396,14 +401,22 @@ class MouseController:
 
             win32api.mouse_event(
                 win32con.MOUSEEVENTF_LEFTUP,
-                int(screen_to_x),
-                int(screen_to_y),
+                int(current_x) if interrupted else int(screen_to_x),
+                int(current_y) if interrupted else int(screen_to_y),
                 0,
                 0,
             )
-            self._ensure_cursor_at_target(int(screen_to_x), int(screen_to_y))
-            self._correct_cursor_position(int(screen_to_x), int(screen_to_y))
-            self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
+            final_x = int(current_x) if interrupted else int(screen_to_x)
+            final_y = int(current_y) if interrupted else int(screen_to_y)
+            self._ensure_cursor_at_target(final_x, final_y)
+            self._correct_cursor_position(final_x, final_y)
+            self._last_cursor_pos = (final_x, final_y)
+            
+            if interrupted:
+                logger.info(f"Drag interrupted at ({final_x}, {final_y})")
+                return False
+
             logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
             settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
             time.sleep(settle_delay if settle_delay > 0 else self.click_delay)
+            return True

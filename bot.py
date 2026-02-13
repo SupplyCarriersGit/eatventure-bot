@@ -775,31 +775,36 @@ class EatventureBot:
             segments = self._build_scroll_segments("up", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
             seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
             for from_x, from_y, to_x, to_y in segments:
-                self.mouse_controller.drag(
+                if not self.mouse_controller.drag(
                     from_x,
                     from_y,
                     to_x,
                     to_y,
                     duration=seg_duration,
                     relative=True,
-                )
+                    interrupt_check=lambda: self._new_level_event.is_set(),
+                ):
+                    return False
         else:
             logger.info("Red icon in forbidden zone → scrolling down to clear")
             segments = self._build_scroll_segments("down", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
             seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
             for from_x, from_y, to_x, to_y in segments:
-                self.mouse_controller.drag(
+                if not self.mouse_controller.drag(
                     from_x,
                     from_y,
                     to_x,
                     to_y,
                     duration=seg_duration,
                     relative=True,
-                )
+                    interrupt_check=lambda: self._new_level_event.is_set(),
+                ):
+                    return False
 
         self._click_idle()
         if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
-            time.sleep(config.FORBIDDEN_ICON_SCROLL_COOLDOWN)
+            if self._sleep_with_interrupt(config.FORBIDDEN_ICON_SCROLL_COOLDOWN):
+                return False  # Or handle interrupt, though this returns bool usually
         self.forbidden_icon_scrolls += 1
         return True
 
@@ -913,6 +918,8 @@ class EatventureBot:
             return
         self._last_new_level_override_time = now
 
+        self._mark_restaurant_completed(source or "priority override")
+
         logger.info(
             "Priority override: clicking new level position at (%s, %s)",
             config.NEW_LEVEL_POS[0],
@@ -923,9 +930,11 @@ class EatventureBot:
             config.NEW_LEVEL_POS[1],
             relative=True,
         )
-        if source == "new level red icon":
-            logger.debug("Priority override: red icon source, skipping transition position click")
-            return
+        
+        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+        if button_delay > 0:
+            time.sleep(button_delay)
+
         logger.info(
             "Priority override: clicking level transition position at (%s, %s)",
             config.LEVEL_TRANSITION_POS[0],
@@ -1456,11 +1465,11 @@ class EatventureBot:
         scroll_ratio = max(0.1, min(1.0, scroll_ratio))
 
         if direction == "up":
-            full_start_x, full_start_y = config.SCROLL_END_POS
-            full_end_x, full_end_y = config.SCROLL_START_POS
+            full_start_x, full_start_y = config.SCROLL_UP_START_POS
+            full_end_x, full_end_y = config.SCROLL_UP_END_POS
         else:
-            full_start_x, full_start_y = config.SCROLL_START_POS
-            full_end_x, full_end_y = config.SCROLL_END_POS
+            full_start_x, full_start_y = config.SCROLL_DOWN_START_POS
+            full_end_x, full_end_y = config.SCROLL_DOWN_END_POS
 
         end_x = int(full_start_x + (full_end_x - full_start_x) * scroll_ratio)
         end_y = int(full_start_y + (full_end_y - full_start_y) * scroll_ratio)
@@ -1510,9 +1519,6 @@ class EatventureBot:
                 "upgradeStation": State.SEARCH_UPGRADE_STATION,
             }
             for asset_name in getattr(config, "SCROLL_INTERRUPT_ASSET_TEMPLATES", ()):
-                if asset_name.startswith("RedIcon"): # Skip red icons in background thread
-                    continue
-
                 template_data = self.templates.get(asset_name)
                 if not template_data:
                     continue
@@ -1575,16 +1581,21 @@ class EatventureBot:
         for from_x, from_y, to_x, to_y in segments:
             if stop_event.is_set():
                 break
-            self.mouse_controller.drag(
+            if not self.mouse_controller.drag(
                 from_x,
                 from_y,
                 to_x,
                 to_y,
                 duration=segment_duration,
                 relative=True,
-            )
+                interrupt_check=lambda: stop_event.is_set() or self._new_level_event.is_set(),
+            ):
+                _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level interrupt during drag")
+                break
             if segment_settle_delay > 0:
-                time.sleep(segment_settle_delay)
+                if self._sleep_with_interrupt(segment_settle_delay):
+                    _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level interrupt during settle")
+                    break
             
             # Synchronous Red Icon Scan (Step-Scan)
             if scan_for_red_icons:
@@ -1975,6 +1986,10 @@ class EatventureBot:
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
             if self._scroll_away_from_forbidden_zone(click_y):
                 return State.FIND_RED_ICONS
+            
+            if self._new_level_event.is_set():
+                return State.TRANSITION_LEVEL
+                
             self.current_red_icon_index += 1
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
         
@@ -2205,12 +2220,12 @@ class EatventureBot:
         extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
 
-        found, confidence, x, y = self._detect_new_level(
+        if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
-        )
-        if found:
-            logger.info("New level detected during stats upgrade")
+            force=True,
+        ):
+            logger.info("New level detected during stats upgrade, transitioning")
             return State.TRANSITION_LEVEL
         
         has_stats_icon, stats_confidence = self._has_stats_upgrade_icon(extended_screenshot)
@@ -2261,12 +2276,12 @@ class EatventureBot:
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
-        found, confidence, x, y = self._detect_new_level(
+        if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
-        )
-        if found:
-            logger.info("New level found, transitioning")
+            force=True,
+        ):
+            logger.info("New level found during box opening, transitioning")
             return State.TRANSITION_LEVEL
         
         box_names = ["box1", "box2", "box3", "box4", "box5"]
@@ -2332,12 +2347,12 @@ class EatventureBot:
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
-        found, confidence, x, y = self._detect_new_level(
+        if self._should_interrupt_for_new_level(
             screenshot=limited_screenshot,
             max_y=config.MAX_SEARCH_Y,
-        )
-        if found:
-            logger.info("New level detected before scroll")
+            force=True,
+        ):
+            logger.info("New level detected before scroll, transitioning")
             return State.TRANSITION_LEVEL
         
         scroll_duration = config.NO_ICON_SCROLL_DURATION if self.no_red_icons_found else config.SCROLL_DURATION
@@ -2355,9 +2370,16 @@ class EatventureBot:
             return State.FIND_RED_ICONS
 
         direction = 'up' if self.scroll_direction == 'up' else 'down'
-        logger.info(
-            f"{'⬆' if direction == 'up' else '⬇'} Scroll {direction.upper()} ({self.scroll_count + 1}/{self.max_scroll_count}, segmented)"
-        )
+        
+        if self.no_red_icons_found:
+            max_count = config.NO_ICON_SCROLL_UP_COUNT if direction == 'up' else config.NO_ICON_SCROLL_DOWN_COUNT
+            logger.info(f"No red icons found → searching {direction.upper()} ({self.scroll_count + 1}/{max_count})")
+        else:
+            max_count = getattr(config, "SCROLL_UP_CYCLES" if direction == 'up' else "MAX_SCROLL_CYCLES", self.max_scroll_count)
+            logger.info(
+                f"{'⬆' if direction == 'up' else '⬇'} Scroll {direction.upper()} ({self.scroll_count + 1}/{max_count}, segmented)"
+            )
+
         interrupt_state = self._scroll_with_background_asset_detection(
             direction,
             scroll_duration,
@@ -2370,7 +2392,7 @@ class EatventureBot:
         
         self.scroll_count += 1
         
-        if self.scroll_count >= self.max_scroll_count:
+        if self.scroll_count >= max_count:
             if self.scroll_direction == 'up':
                 self.scroll_direction = 'down'
             else:
@@ -2392,16 +2414,20 @@ class EatventureBot:
         ):
             return State.TRANSITION_LEVEL
         
-        logger.info("Clicking new level button position")
-        self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
-        if config.NEW_LEVEL_BUTTON_DELAY > 0:
-            if self._sleep_with_interrupt(config.NEW_LEVEL_BUTTON_DELAY):
+        logger.info(f"Clicking new level position at {config.NEW_LEVEL_POS}")
+        self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
+        
+        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+        if button_delay > 0:
+            if self._sleep_with_interrupt(button_delay):
                 return State.TRANSITION_LEVEL
         
-        logger.info("Triggering follow-up click after new level check")
-        self.mouse_controller.click(166, 526, relative=True)
-        if config.NEW_LEVEL_FOLLOWUP_DELAY > 0:
-            if self._sleep_with_interrupt(config.NEW_LEVEL_FOLLOWUP_DELAY):
+        logger.info(f"Clicking level transition position at {config.LEVEL_TRANSITION_POS}")
+        self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+        
+        followup_delay = getattr(config, "NEW_LEVEL_FOLLOWUP_DELAY", 0.02)
+        if followup_delay > 0:
+            if self._sleep_with_interrupt(followup_delay):
                 return State.TRANSITION_LEVEL
 
         self.scroll_direction = 'down'
@@ -2413,6 +2439,11 @@ class EatventureBot:
         
         max_attempts = 5
         
+        # Check if we already marked completion recently (e.g. via override)
+        if self.completion_detected_time and (datetime.now() - self.completion_detected_time).total_seconds() < 5.0:
+            logger.info("Completion already marked recently; proceeding to transition bookkeeping")
+            return self._finalize_transition()
+
         for attempt in range(max_attempts):
             limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
@@ -2422,33 +2453,23 @@ class EatventureBot:
             )
             if found:
                 self._mark_restaurant_completed("new level button", confidence)
-                logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
-                self.mouse_controller.click(x, y, relative=True)
+                logger.info(f"New level button found at ({x}, {y}); clicking config.NEW_LEVEL_POS at {config.NEW_LEVEL_POS}")
+                
+                # Use fixed config positions as requested
+                self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
+                
+                button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+                if button_delay > 0:
+                    time.sleep(button_delay)
+
+                logger.info(f"Clicking level transition position at {config.LEVEL_TRANSITION_POS}")
+                self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+
                 if config.TRANSITION_POST_CLICK_DELAY > 0:
                     if self._sleep_with_interrupt(config.TRANSITION_POST_CLICK_DELAY):
                         return State.TRANSITION_LEVEL
 
-                self.total_levels_completed += 1
-
-                time_spent = 0
-                if self.current_level_start_time:
-                    completion_time = self.completion_detected_time or datetime.now()
-                    time_spent = (completion_time - self.current_level_start_time).total_seconds()
-
-                completion_source = self.completion_detected_by or "new level button"
-                self.current_level_start_time = datetime.now()
-                self.completion_detected_time = None
-                self.completion_detected_by = None
-
-                self.telegram.notify_new_level(self.total_levels_completed, time_spent)
-                self.historical_learner.record_completion(
-                    time_spent,
-                    completion_source,
-                )
-
-                logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
-                logger.info("Waiting for unlock button after level transition")
-                return State.WAIT_FOR_UNLOCK
+                return self._finalize_transition()
             
             if attempt < max_attempts - 1:
                 if config.TRANSITION_RETRY_DELAY > 0:
@@ -2459,6 +2480,29 @@ class EatventureBot:
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
+
+    def _finalize_transition(self):
+        self.total_levels_completed += 1
+
+        time_spent = 0
+        if self.current_level_start_time:
+            completion_time = self.completion_detected_time or datetime.now()
+            time_spent = (completion_time - self.current_level_start_time).total_seconds()
+
+        completion_source = self.completion_detected_by or "new level button"
+        self.current_level_start_time = datetime.now()
+        self.completion_detected_time = None
+        self.completion_detected_by = None
+
+        self.telegram.notify_new_level(self.total_levels_completed, time_spent)
+        self.historical_learner.record_completion(
+            time_spent,
+            completion_source,
+        )
+
+        logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
+        logger.info("Waiting for unlock button after level transition")
+        return State.WAIT_FOR_UNLOCK
     
     def handle_wait_for_unlock(self, current_state):
         self._click_idle()
