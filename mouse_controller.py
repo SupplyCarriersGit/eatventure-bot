@@ -47,13 +47,6 @@ class MouseController:
             )
         return clamped_x, clamped_y
 
-    def _send_mouse_move(self, screen_x, screen_y):
-        width = max(1, win32api.GetSystemMetrics(0))
-        height = max(1, win32api.GetSystemMetrics(1))
-        nx = int(screen_x * 65535 / (width - 1))
-        ny = int(screen_y * 65535 / (height - 1))
-        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE | win32con.MOUSEEVENTF_ABSOLUTE, nx, ny, 0, 0)
-
     def _send_click(self, screen_x, screen_y, down_up_delay=None):
         retries = max(1, int(getattr(config, "MOUSE_CLICK_RETRY_COUNT", 1)))
         settle_retry_delay = max(0.0, float(getattr(config, "MOUSE_CLICK_RETRY_SETTLE_DELAY", 0.0)))
@@ -78,9 +71,9 @@ class MouseController:
                 time.sleep(settle_retry_delay)
 
         self._ensure_min_click_interval()
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
         time.sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         self._last_click_time = time.monotonic()
 
     def _send_mouse_down(self, screen_x, screen_y):
@@ -93,10 +86,10 @@ class MouseController:
         self._correct_cursor_position(screen_x, screen_y)
         self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
         self._ensure_min_click_interval()
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
 
     def _send_mouse_up(self, screen_x, screen_y):
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         self._last_click_time = time.monotonic()
 
     def _ensure_min_click_interval(self):
@@ -132,7 +125,6 @@ class MouseController:
                 self._last_cursor_pos = target
                 return
             win32api.SetCursorPos(target)
-            self._send_mouse_move(target[0], target[1])
             if correction_delay > 0:
                 time.sleep(correction_delay)
         self._last_cursor_pos = target
@@ -153,7 +145,6 @@ class MouseController:
 
         for _ in range(retries):
             win32api.SetCursorPos(target)
-            self._send_mouse_move(target[0], target[1])
             if retry_delay > 0:
                 time.sleep(retry_delay)
             current = win32api.GetCursorPos()
@@ -230,25 +221,40 @@ class MouseController:
                 time.sleep(check_interval)
     
     def is_in_forbidden_zone(self, x, y):
-        # Specific check for the bottom navigation bar zone which has its own config names
         if (y >= config.FORBIDDEN_CLICK_Y_MIN and 
             config.FORBIDDEN_CLICK_X_MIN <= x <= config.FORBIDDEN_CLICK_X_MAX):
             logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_CLICK zone")
             return True
         
-        # Check standard numbered forbidden zones
-        for i in range(1, 7):
-            try:
-                x_min = getattr(config, f"FORBIDDEN_ZONE_{i}_X_MIN")
-                x_max = getattr(config, f"FORBIDDEN_ZONE_{i}_X_MAX")
-                y_min = getattr(config, f"FORBIDDEN_ZONE_{i}_Y_MIN")
-                y_max = getattr(config, f"FORBIDDEN_ZONE_{i}_Y_MAX")
-                
-                if y_min <= y <= y_max and x_min <= x <= x_max:
-                    logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_{i}")
-                    return True
-            except AttributeError:
-                continue
+        if (config.FORBIDDEN_ZONE_1_Y_MIN <= y <= config.FORBIDDEN_ZONE_1_Y_MAX and
+            config.FORBIDDEN_ZONE_1_X_MIN <= x <= config.FORBIDDEN_ZONE_1_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_1")
+            return True
+        
+        if (config.FORBIDDEN_ZONE_2_Y_MIN <= y <= config.FORBIDDEN_ZONE_2_Y_MAX and
+            config.FORBIDDEN_ZONE_2_X_MIN <= x <= config.FORBIDDEN_ZONE_2_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_2")
+            return True
+        
+        if (config.FORBIDDEN_ZONE_3_Y_MIN <= y <= config.FORBIDDEN_ZONE_3_Y_MAX and
+            config.FORBIDDEN_ZONE_3_X_MIN <= x <= config.FORBIDDEN_ZONE_3_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_3")
+            return True
+        
+        if (config.FORBIDDEN_ZONE_4_Y_MIN <= y <= config.FORBIDDEN_ZONE_4_Y_MAX and
+            config.FORBIDDEN_ZONE_4_X_MIN <= x <= config.FORBIDDEN_ZONE_4_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_4")
+            return True
+        
+        if (config.FORBIDDEN_ZONE_5_Y_MIN <= y <= config.FORBIDDEN_ZONE_5_Y_MAX and
+            config.FORBIDDEN_ZONE_5_X_MIN <= x <= config.FORBIDDEN_ZONE_5_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_5")
+            return True
+
+        if (config.FORBIDDEN_ZONE_6_Y_MIN <= y <= config.FORBIDDEN_ZONE_6_Y_MAX and
+            config.FORBIDDEN_ZONE_6_X_MIN <= x <= config.FORBIDDEN_ZONE_6_X_MAX):
+            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_6")
+            return True
         
         return False
     
@@ -341,7 +347,7 @@ class MouseController:
             time.sleep(self.click_delay)
             return True
     
-    def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True, steps=None, interrupt_callback=None):
+    def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True):
         with self._mouse_action_lock:
             if relative:
                 win_x, win_y = self.get_window_position()
@@ -368,36 +374,21 @@ class MouseController:
 
             win32api.mouse_event(
                 win32con.MOUSEEVENTF_LEFTDOWN,
-                0,
-                0,
+                int(screen_from_x),
+                int(screen_from_y),
                 0,
                 0,
             )
-            # Short delay to let the OS/App register the click state before movement starts
-            time.sleep(max(0.01, config.MOUSE_DOWN_UP_DELAY))
+            time.sleep(config.MOUSE_DOWN_UP_DELAY)
 
-            if steps is None:
-                steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-            else:
-                steps = max(1, int(steps))
-            
+            steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
             duration = max(duration, 0.001)
             start_time = time.monotonic()
-            interrupted = False
             for i in range(steps + 1):
-                if interrupt_callback and interrupt_callback():
-                    interrupted = True
-                    break
-
                 t = i / steps
                 current_x = int(screen_from_x + (screen_to_x - screen_from_x) * t)
                 current_y = int(screen_from_y + (screen_to_y - screen_from_y) * t)
-                
-                # SetCursorPos updates the system cursor position
                 win32api.SetCursorPos((current_x, current_y))
-                # _send_mouse_move ensures movement events are recognized during drag
-                self._send_mouse_move(current_x, current_y)
-                
                 target_time = start_time + (duration * t)
                 sleep_time = target_time - time.monotonic()
                 if sleep_time > 0:
@@ -405,20 +396,14 @@ class MouseController:
 
             win32api.mouse_event(
                 win32con.MOUSEEVENTF_LEFTUP,
-                0,
-                0,
+                int(screen_to_x),
+                int(screen_to_y),
                 0,
                 0,
             )
-            
-            if interrupted:
-                logger.info("Drag interrupted")
-                return False
-
             self._ensure_cursor_at_target(int(screen_to_x), int(screen_to_y))
             self._correct_cursor_position(int(screen_to_x), int(screen_to_y))
             self._last_cursor_pos = (int(screen_to_x), int(screen_to_y))
             logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
             settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
             time.sleep(settle_delay if settle_delay > 0 else self.click_delay)
-            return True

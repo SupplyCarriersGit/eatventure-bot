@@ -5,7 +5,6 @@ import logging
 import re
 import threading
 from datetime import datetime
-import numpy as np
 
 from window_capture import WindowCapture, ForbiddenAreaOverlay
 from image_matcher import ImageMatcher
@@ -13,10 +12,573 @@ from mouse_controller import MouseController
 from state_machine import StateMachine, State
 from telegram_notifier import TelegramNotifier
 from asset_scanner import AssetScanner
-from ai_optimizer import AdaptiveTuner, VisionOptimizer, VisionPersistence, HistoricalLearner
 import config
 
 logger = logging.getLogger(__name__)
+
+
+class AdaptiveTuner:
+    def __init__(self):
+        self.enabled = config.ADAPTIVE_TUNER_ENABLED
+        self.alpha = config.ADAPTIVE_TUNER_ALPHA
+        self.click_success_rate = 1.0
+        self.search_success_rate = 1.0
+        self.click_delay = config.CLICK_DELAY
+        self.move_delay = config.MOUSE_MOVE_DELAY
+        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
+        self.search_interval = config.UPGRADE_SEARCH_INTERVAL
+
+    def _ema(self, current, new_value):
+        return (1 - self.alpha) * current + self.alpha * new_value
+
+    def record_click_result(self, success):
+        if not self.enabled:
+            return
+        self.click_success_rate = self._ema(self.click_success_rate, 1.0 if success else 0.0)
+        self._adjust_click_timing()
+
+    def record_search_result(self, success):
+        if not self.enabled:
+            return
+        self.search_success_rate = self._ema(self.search_success_rate, 1.0 if success else 0.0)
+        self._adjust_search_timing()
+
+    def _adjust_click_timing(self):
+        if self.click_success_rate < 0.85:
+            self.click_delay = min(self.click_delay + 0.01, config.ADAPTIVE_TUNER_MAX_CLICK_DELAY)
+            self.move_delay = min(self.move_delay + 0.001, config.ADAPTIVE_TUNER_MAX_MOVE_DELAY)
+        elif self.click_success_rate > 0.97:
+            self.click_delay = max(self.click_delay - 0.005, config.ADAPTIVE_TUNER_MIN_CLICK_DELAY)
+            self.move_delay = max(self.move_delay - 0.001, config.ADAPTIVE_TUNER_MIN_MOVE_DELAY)
+
+    def _adjust_search_timing(self):
+        if self.search_success_rate < 0.7:
+            self.search_interval = min(self.search_interval + 0.01, config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL)
+            self.upgrade_click_interval = min(
+                self.upgrade_click_interval + 0.001,
+                config.ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL,
+            )
+        elif self.search_success_rate > 0.9:
+            self.search_interval = max(self.search_interval - 0.005, config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL)
+            self.upgrade_click_interval = max(
+                self.upgrade_click_interval - 0.001,
+                config.ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL,
+            )
+
+
+class VisionOptimizer:
+    def __init__(self, persistence=None):
+        self.enabled = config.AI_VISION_ENABLED
+        self.alpha = config.AI_VISION_ALPHA
+        self.alpha_max = config.AI_VISION_ALPHA_MAX
+        self.confidence_boost = config.AI_VISION_CONFIDENCE_BOOST
+        self.red_icon_threshold = config.RED_ICON_THRESHOLD
+        self.new_level_threshold = config.NEW_LEVEL_THRESHOLD
+        self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
+        self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
+        self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
+        self.box_threshold = config.BOX_THRESHOLD
+        self.persistence = persistence
+        self._red_icon_miss_count = 0
+        self._new_level_miss_count = 0
+        self._new_level_red_icon_miss_count = 0
+        self._upgrade_station_miss_count = 0
+        self._stats_upgrade_miss_count = 0
+        self._box_miss_count = 0
+
+    def _ema(self, current, new_value, alpha=None):
+        blend = self.alpha if alpha is None else alpha
+        return (1 - blend) * current + blend * new_value
+
+    def _adaptive_alpha(self, confidence):
+        if confidence <= 0:
+            return self.alpha
+        boost = max(0.0, min(1.0, (confidence - 0.8))) * self.confidence_boost
+        return min(self.alpha + boost, self.alpha_max)
+
+    def update_red_icon_confidences(self, confidences):
+        if not self.enabled or not confidences:
+            return
+        avg_conf = sum(confidences) / len(confidences)
+        target = max(
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            min(avg_conf - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
+        )
+        self.red_icon_threshold = self._ema(self.red_icon_threshold, target, self._adaptive_alpha(avg_conf))
+        self._persist()
+
+    def update_red_icon_scan(self, confidences):
+        if not self.enabled:
+            return
+        if confidences:
+            self._red_icon_miss_count = 0
+            self.update_red_icon_confidences(confidences)
+            return
+
+        self._red_icon_miss_count += 1
+        if self._red_icon_miss_count < config.AI_RED_ICON_MISS_WINDOW:
+            return
+        self._red_icon_miss_count = 0
+
+        target = max(
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            self.red_icon_threshold - config.AI_RED_ICON_MISS_STEP,
+        )
+        self.red_icon_threshold = self._ema(self.red_icon_threshold, target, self.alpha_max)
+        self._persist()
+
+    def update_new_level_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        self._new_level_miss_count = 0
+        target = max(
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            min(confidence, config.AI_NEW_LEVEL_THRESHOLD_MAX),
+        )
+        self.new_level_threshold = self._ema(
+            self.new_level_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
+    def update_new_level_red_icon_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        self._new_level_red_icon_miss_count = 0
+        target = max(
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            min(confidence, config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX),
+        )
+        self.new_level_red_icon_threshold = self._ema(
+            self.new_level_red_icon_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
+    def update_upgrade_station_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        self._upgrade_station_miss_count = 0
+        target = max(
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            min(confidence, config.AI_UPGRADE_STATION_THRESHOLD_MAX),
+        )
+        self.upgrade_station_threshold = self._ema(
+            self.upgrade_station_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
+    def update_stats_upgrade_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        self._stats_upgrade_miss_count = 0
+        target = max(
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            min(confidence, config.AI_STATS_UPGRADE_THRESHOLD_MAX),
+        )
+        self.stats_upgrade_threshold = self._ema(
+            self.stats_upgrade_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
+    def update_box_confidence(self, confidence):
+        if not self.enabled or confidence <= 0:
+            return
+        self._box_miss_count = 0
+        target = max(
+            0.85,
+            min(confidence, 0.995),
+        )
+        self.box_threshold = self._ema(
+            self.box_threshold,
+            target,
+            self._adaptive_alpha(confidence),
+        )
+        self._persist()
+
+    def update_new_level_miss(self):
+        if not self.enabled:
+            return
+        self._new_level_miss_count += 1
+        if self._new_level_miss_count < config.AI_NEW_LEVEL_MISS_WINDOW:
+            return
+        self._new_level_miss_count = 0
+        target = max(
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            self.new_level_threshold - config.AI_NEW_LEVEL_MISS_STEP,
+        )
+        self.new_level_threshold = self._ema(self.new_level_threshold, target, self.alpha_max)
+        self._persist()
+
+    def update_new_level_red_icon_miss(self):
+        if not self.enabled:
+            return
+        self._new_level_red_icon_miss_count += 1
+        if self._new_level_red_icon_miss_count < config.AI_NEW_LEVEL_RED_ICON_MISS_WINDOW:
+            return
+        self._new_level_red_icon_miss_count = 0
+        target = max(
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            self.new_level_red_icon_threshold - config.AI_NEW_LEVEL_RED_ICON_MISS_STEP,
+        )
+        self.new_level_red_icon_threshold = self._ema(
+            self.new_level_red_icon_threshold,
+            target,
+            self.alpha_max,
+        )
+        self._persist()
+
+    def update_upgrade_station_miss(self):
+        if not self.enabled:
+            return
+        self._upgrade_station_miss_count += 1
+        if self._upgrade_station_miss_count < config.AI_UPGRADE_STATION_MISS_WINDOW:
+            return
+        self._upgrade_station_miss_count = 0
+        target = max(
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            self.upgrade_station_threshold - config.AI_UPGRADE_STATION_MISS_STEP,
+        )
+        self.upgrade_station_threshold = self._ema(
+            self.upgrade_station_threshold,
+            target,
+            self.alpha_max,
+        )
+        self._persist()
+
+    def update_stats_upgrade_miss(self):
+        if not self.enabled:
+            return
+        self._stats_upgrade_miss_count += 1
+        if self._stats_upgrade_miss_count < config.AI_STATS_UPGRADE_MISS_WINDOW:
+            return
+        self._stats_upgrade_miss_count = 0
+        target = max(
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            self.stats_upgrade_threshold - config.AI_STATS_UPGRADE_MISS_STEP,
+        )
+        self.stats_upgrade_threshold = self._ema(
+            self.stats_upgrade_threshold,
+            target,
+            self.alpha_max,
+        )
+        self._persist()
+
+    def update_box_miss(self):
+        if not self.enabled:
+            return
+        self._box_miss_count += 1
+        if self._box_miss_count < 3:
+            return
+        self._box_miss_count = 0
+        target = max(0.85, self.box_threshold - 0.005)
+        self.box_threshold = self._ema(self.box_threshold, target, self.alpha_max)
+        self._persist()
+
+    def apply_persisted_state(self, state):
+        if not state:
+            return
+        if "red_icon_threshold" in state:
+            self.red_icon_threshold = float(state["red_icon_threshold"])
+        if "new_level_threshold" in state:
+            self.new_level_threshold = float(state["new_level_threshold"])
+        if "new_level_red_icon_threshold" in state:
+            self.new_level_red_icon_threshold = float(state["new_level_red_icon_threshold"])
+        if "upgrade_station_threshold" in state:
+            self.upgrade_station_threshold = float(state["upgrade_station_threshold"])
+        if "stats_upgrade_threshold" in state:
+            self.stats_upgrade_threshold = float(state["stats_upgrade_threshold"])
+        if "box_threshold" in state:
+            self.box_threshold = float(state["box_threshold"])
+
+    def _persist(self):
+        if not self.persistence:
+            return
+        state = {
+            "red_icon_threshold": self.red_icon_threshold,
+            "new_level_threshold": self.new_level_threshold,
+            "new_level_red_icon_threshold": self.new_level_red_icon_threshold,
+            "upgrade_station_threshold": self.upgrade_station_threshold,
+            "stats_upgrade_threshold": self.stats_upgrade_threshold,
+            "box_threshold": self.box_threshold,
+        }
+        self.persistence.save({key: float(value) for key, value in state.items()})
+
+
+class VisionPersistence:
+    def __init__(self, path, save_interval):
+        self.path = path
+        self.save_interval = save_interval
+        self._last_save_time = 0.0
+
+    def load(self):
+        if not self.path:
+            return {}
+        if not os.path.exists(self.path):
+            return {}
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Failed to load vision state from %s: %s. Using defaults.",
+                self.path,
+                exc,
+            )
+            return {}
+
+    def save(self, state):
+        if not self.path:
+            return
+        now = time.monotonic()
+        if self.save_interval > 0 and now - self._last_save_time < self.save_interval:
+            return
+        directory = os.path.dirname(self.path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+        self._last_save_time = now
+
+
+class HistoricalLearner:
+    def __init__(self, bot, persistence=None):
+        self.bot = bot
+        self.persistence = persistence
+        self.enabled = config.AI_LEARNING_ENABLED
+        self.interval = max(0.01, float(getattr(config, "AI_LEARNING_THREAD_INTERVAL", 0.05)))
+        self.pair_window = max(2, int(getattr(config, "AI_LEARNING_PAIR_WINDOW", 2)))
+        self.batch_window = max(2, int(getattr(config, "AI_LEARNING_BATCH_WINDOW", 7)))
+        self.ema_alpha = max(0.01, min(0.8, float(getattr(config, "AI_LEARNING_EMA_ALPHA", 0.18))))
+        self.auto_write_config = bool(getattr(config, "AI_LEARNING_AUTOWRITE_CONFIG", False))
+        self.top_k = max(1, int(getattr(config, "AI_LEARNING_PROFILE_BLEND_TOP_K", 3)))
+        self.min_improvement_ratio = max(0.0, float(getattr(config, "AI_LEARNING_MIN_IMPROVEMENT_RATIO", 0.03)))
+        self.apply_cooldown = max(0.0, float(getattr(config, "AI_LEARNING_APPLY_COOLDOWN", 1.2)))
+        self._last_apply_time = 0.0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._records = []
+        self._total_completions = 0
+        self._last_pair_processed = 0
+        self._last_batch_processed = 0
+
+        persisted = self.persistence.load() if self.persistence else {}
+        if persisted:
+            self._records = list(persisted.get("records", []))[-100:]
+            self._total_completions = int(persisted.get("total_completions", len(self._records)))
+            self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
+            self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
+
+            max_pair_processed = self._total_completions // self.pair_window
+            max_batch_processed = self._total_completions // self.batch_window
+            self._last_pair_processed = min(self._last_pair_processed, max_pair_processed)
+            self._last_batch_processed = min(self._last_batch_processed, max_batch_processed)
+
+    def start(self):
+        if not self.enabled:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="historical_learner", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._persist()
+
+    def record_completion(self, time_spent, source):
+        if not self.enabled or time_spent <= 0:
+            return
+        snapshot = self.bot.get_runtime_behavior_snapshot()
+        record = {
+            "timestamp": time.time(),
+            "time_spent": float(time_spent),
+            "source": source,
+            "behavior": snapshot,
+        }
+        with self._lock:
+            self._records.append(record)
+            self._records = self._records[-120:]
+            self._total_completions += 1
+        self._persist()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self._run_learning_cycle()
+            except Exception:
+                logger.exception("Historical learner cycle failed; continuing")
+            time.sleep(max(0.01, self.interval))
+
+    def _run_learning_cycle(self):
+        with self._lock:
+            records = list(self._records)
+            total_completions = int(self._total_completions)
+
+        if self._is_apply_cooldown_active():
+            self._persist()
+            return
+
+        if total_completions >= self.pair_window and total_completions // self.pair_window > self._last_pair_processed:
+            pair_records = records[-self.pair_window:]
+            profile = self._build_profile(pair_records)
+            self._apply_profile_if_improved(profile, pair_records, f"pair-{self.pair_window}")
+            self._last_pair_processed = total_completions // self.pair_window
+
+        # Re-check cooldown after pair application to prevent back-to-back
+        # profile rewrites within the same learning pass.
+        if self._is_apply_cooldown_active():
+            self._persist()
+            return
+
+        if total_completions >= self.batch_window and total_completions // self.batch_window > self._last_batch_processed:
+            batch_records = records[-self.batch_window:]
+            profile = self._build_profile(batch_records)
+            self._apply_profile_if_improved(profile, batch_records, f"batch-{self.batch_window}")
+            self._last_batch_processed = total_completions // self.batch_window
+
+        self._persist()
+
+    def _is_apply_cooldown_active(self):
+        if self.apply_cooldown <= 0:
+            return False
+        return (time.monotonic() - self._last_apply_time) < self.apply_cooldown
+
+    def _build_profile(self, records):
+        valid = [r for r in records if r.get("time_spent", 0) > 0 and r.get("behavior")]
+        if not valid:
+            return None
+        ranked = sorted(valid, key=lambda item: item.get("time_spent", float("inf")))
+        top = ranked[: self.top_k]
+        profile = {"click_delay": 0.0, "move_delay": 0.0, "upgrade_click_interval": 0.0, "search_interval": 0.0}
+        for record in top:
+            behavior = record.get("behavior") or {}
+            for key in profile:
+                profile[key] += float(behavior.get(key, 0.0))
+        count = float(len(top))
+        return {key: value / count for key, value in profile.items()}
+
+    def _apply_profile_if_improved(self, profile, records, label):
+        if not profile or not records:
+            return
+        durations = [r.get("time_spent", 0.0) for r in records if r.get("time_spent", 0.0) > 0]
+        if not durations:
+            return
+        best_time = min(durations)
+        avg_time = sum(durations) / len(durations)
+        if avg_time <= 0:
+            return
+        improvement_ratio = (avg_time - best_time) / avg_time
+        if improvement_ratio < self.min_improvement_ratio:
+            logger.debug(
+                "Historical learner (%s) skipped profile apply; improvement %.2f%% below %.2f%%",
+                label,
+                improvement_ratio * 100,
+                self.min_improvement_ratio * 100,
+            )
+            return
+        self._apply_best_record({"behavior": profile, "time_spent": best_time}, label)
+        self._last_apply_time = time.monotonic()
+
+    def _ema(self, current, target):
+        return (1 - self.ema_alpha) * current + self.ema_alpha * target
+
+    def _clamp(self, value, minimum, maximum):
+        return max(minimum, min(maximum, value))
+
+    def _apply_best_record(self, record, label):
+        behavior = record.get("behavior") or {}
+        if not behavior:
+            return
+
+        current = self.bot.get_runtime_behavior_snapshot()
+        tuned = {}
+        keys = ("click_delay", "move_delay", "upgrade_click_interval", "search_interval")
+        for key in keys:
+            if key not in behavior or key not in current:
+                continue
+            tuned[key] = self._ema(float(current[key]), float(behavior[key]))
+
+        tuned["click_delay"] = self._clamp(
+            tuned.get("click_delay", current["click_delay"]),
+            config.AI_LEARNING_MIN_CLICK_DELAY,
+            config.AI_LEARNING_MAX_CLICK_DELAY,
+        )
+        tuned["move_delay"] = self._clamp(
+            tuned.get("move_delay", current["move_delay"]),
+            config.AI_LEARNING_MIN_MOVE_DELAY,
+            config.AI_LEARNING_MAX_MOVE_DELAY,
+        )
+        tuned["upgrade_click_interval"] = self._clamp(
+            tuned.get("upgrade_click_interval", current["upgrade_click_interval"]),
+            config.AI_LEARNING_MIN_UPGRADE_INTERVAL,
+            config.AI_LEARNING_MAX_UPGRADE_INTERVAL,
+        )
+        tuned["search_interval"] = self._clamp(
+            tuned.get("search_interval", current["search_interval"]),
+            config.AI_LEARNING_MIN_SEARCH_INTERVAL,
+            config.AI_LEARNING_MAX_SEARCH_INTERVAL,
+        )
+
+        self.bot.apply_learned_behavior(tuned, reason=label, best_time=record.get("time_spent", 0.0))
+
+        if self.auto_write_config:
+            try:
+                self._write_config_updates(tuned)
+            except OSError as exc:
+                logger.warning("Historical learner could not update config.py: %s", exc)
+            except Exception:
+                logger.exception("Unexpected error while persisting learned config")
+
+    def _write_config_updates(self, tuned):
+        mapping = {
+            "CLICK_DELAY": tuned.get("click_delay"),
+            "MOUSE_MOVE_DELAY": tuned.get("move_delay"),
+            "UPGRADE_CLICK_INTERVAL": tuned.get("upgrade_click_interval"),
+            "UPGRADE_SEARCH_INTERVAL": tuned.get("search_interval"),
+        }
+        config_path = os.path.join(os.path.dirname(__file__), "config.py")
+        if not os.path.exists(config_path):
+            return
+
+        with open(config_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+
+        changed = False
+        for key, value in mapping.items():
+            if value is None:
+                continue
+            replacement = f"{key} = {float(value):.6f}"
+            pattern = rf"^{key}\s*=\s*[^\n]+"
+            updated, count = re.subn(pattern, replacement, content, count=1, flags=re.MULTILINE)
+            if count:
+                content = updated
+                changed = True
+
+        if changed:
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+
+    def _persist(self):
+        if not self.persistence:
+            return
+        state = {
+            "records": self._records[-120:],
+            "total_completions": self._total_completions,
+            "last_pair_processed": self._last_pair_processed,
+            "last_batch_processed": self._last_batch_processed,
+        }
+        self.persistence.save(state)
 
 
 class EatventureBot:
@@ -51,7 +613,7 @@ class EatventureBot:
         self.wait_for_unlock_attempts = 0
         self.max_wait_for_unlock_attempts = 4
         
-        self.scroll_direction = 'up'
+        self.scroll_direction = 'down'
         self.scroll_count = 0
         self.max_scroll_count = max(1, int(getattr(config, "MAX_SCROLL_CYCLES", 5)))
         self.work_done = False
@@ -87,7 +649,6 @@ class EatventureBot:
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
         self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
         self._capture_lock = threading.Lock()
-        self._interrupt_lock = threading.Lock()
         self._new_level_event = threading.Event()
         self._new_level_interrupt = None
         self._new_level_monitor_stop = threading.Event()
@@ -123,25 +684,22 @@ class EatventureBot:
         logger.info("Bot initialized successfully")
 
     def _record_new_level_interrupt(self, source, confidence, x, y):
-        with self._interrupt_lock:
-            self._new_level_interrupt = {
-                "source": source,
-                "confidence": confidence,
-                "x": x,
-                "y": y,
-                "timestamp": time.monotonic(),
-            }
+        self._new_level_interrupt = {
+            "source": source,
+            "confidence": confidence,
+            "x": x,
+            "y": y,
+            "timestamp": time.monotonic(),
+        }
         self._new_level_event.set()
         self._mark_restaurant_completed(source, confidence)
 
     def _consume_new_level_interrupt(self):
-        with self._interrupt_lock:
-            if not self._new_level_event.is_set():
-                return None
-            interrupt = self._new_level_interrupt
-            self._new_level_interrupt = None
-            self._new_level_event.clear()
-            return interrupt
+        if not self._new_level_event.is_set():
+            return None
+        interrupt = self._new_level_interrupt
+        self._new_level_event.clear()
+        return interrupt
 
     def _monitor_new_level(self):
         interval = config.NEW_LEVEL_MONITOR_INTERVAL
@@ -150,12 +708,12 @@ class EatventureBot:
                 time.sleep(max(interval, 0.01))
                 continue
 
-            limited_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
             red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
                 screenshot=limited_screenshot,
-                max_y=config.EXTENDED_SEARCH_Y,
-                record_miss=False,
+                max_y=config.MAX_SEARCH_Y,
+                force=True,
             )
             if red_found:
                 logger.info(
@@ -169,8 +727,8 @@ class EatventureBot:
 
             found, confidence, x, y = self._detect_new_level(
                 screenshot=limited_screenshot,
-                max_y=config.EXTENDED_SEARCH_Y,
-                record_miss=False,
+                max_y=config.MAX_SEARCH_Y,
+                force=True,
             )
             if found:
                 logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
@@ -200,6 +758,51 @@ class EatventureBot:
             self._last_idle_click_time = time.monotonic()
         return clicked
 
+    def _scroll_away_from_forbidden_zone(self, y_position):
+        if self.forbidden_icon_scrolls >= config.FORBIDDEN_ICON_MAX_SCROLLS:
+            logger.warning("Max forbidden-icon scrolls reached; skipping icon")
+            return False
+
+        if y_position >= config.FORBIDDEN_ZONE_5_Y_MIN or y_position >= config.FORBIDDEN_CLICK_Y_MIN:
+            direction = "up"
+        elif y_position <= config.FORBIDDEN_ZONE_6_Y_MAX or y_position <= config.FORBIDDEN_ZONE_4_Y_MAX:
+            direction = "down"
+        else:
+            direction = self.scroll_direction
+
+        if direction == "up":
+            logger.info("Red icon in forbidden zone → scrolling up to clear")
+            segments = self._build_scroll_segments("up", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
+            seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
+            for from_x, from_y, to_x, to_y in segments:
+                self.mouse_controller.drag(
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    duration=seg_duration,
+                    relative=True,
+                )
+        else:
+            logger.info("Red icon in forbidden zone → scrolling down to clear")
+            segments = self._build_scroll_segments("down", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
+            seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
+            for from_x, from_y, to_x, to_y in segments:
+                self.mouse_controller.drag(
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    duration=seg_duration,
+                    relative=True,
+                )
+
+        self._click_idle()
+        if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
+            time.sleep(config.FORBIDDEN_ICON_SCROLL_COOLDOWN)
+        self.forbidden_icon_scrolls += 1
+        return True
+
     def resolve_priority_state(self, current_state):
         if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
             logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
@@ -218,23 +821,20 @@ class EatventureBot:
             if self._no_red_scroll_cycle_pending:
                 logger.info("Clearing deferred no-red scroll due to pending level transition interrupt")
                 self._no_red_scroll_cycle_pending = False
-            
-            # Record completion stats before clicking
-            self._mark_restaurant_completed(interrupt["source"], interrupt["confidence"])
-            
-            if self._click_new_level_override(source=interrupt["source"]):
-                # Full transition sequence handled (New Level button + Fly button)
-                self._finalize_level_completion()
-                return State.WAIT_FOR_UNLOCK
-            
+            self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
 
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
+            logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
+            self._no_red_scroll_cycle_pending = False
+            self.no_red_icons_found = True
+            return State.SCROLL
+
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
             force=True,
-            record_miss=False,
         )
         if priority_hit:
             source, confidence, x, y = priority_hit
@@ -247,15 +847,7 @@ class EatventureBot:
             if self._no_red_scroll_cycle_pending:
                 logger.info("Clearing deferred no-red scroll due to immediate level transition")
                 self._no_red_scroll_cycle_pending = False
-            
-            # Record completion stats before clicking
-            self._mark_restaurant_completed(source, confidence)
-            
-            if self._click_new_level_override(source=source):
-                # Full transition sequence handled
-                self._finalize_level_completion()
-                return State.WAIT_FOR_UNLOCK
-                
+            self._click_new_level_override(source=source)
             return State.TRANSITION_LEVEL
 
         return None
@@ -318,7 +910,7 @@ class EatventureBot:
         cooldown = getattr(config, "NEW_LEVEL_OVERRIDE_COOLDOWN", 0.0)
         if cooldown > 0 and now - self._last_new_level_override_time < cooldown:
             logger.debug("Priority override: skipping click sequence due to cooldown")
-            return False
+            return
         self._last_new_level_override_time = now
 
         logger.info(
@@ -331,10 +923,9 @@ class EatventureBot:
             config.NEW_LEVEL_POS[1],
             relative=True,
         )
-        
-        # Settle delay to allow transition popup to appear
-        time.sleep(max(0.1, config.TRANSITION_RETRY_DELAY))
-
+        if source == "new level red icon":
+            logger.debug("Priority override: red icon source, skipping transition position click")
+            return
         logger.info(
             "Priority override: clicking level transition position at (%s, %s)",
             config.LEVEL_TRANSITION_POS[0],
@@ -345,7 +936,6 @@ class EatventureBot:
             config.LEVEL_TRANSITION_POS[1],
             relative=True,
         )
-        return True
 
     def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
@@ -356,14 +946,6 @@ class EatventureBot:
 
         with self._capture_lock:
             frame = self.window_capture.capture(max_y=max_y)
-        
-        if frame is None:
-            logger.warning("Capture failed, returning empty frame placeholder")
-            # Create a black frame of the expected size if capture fails
-            frame = np.zeros((self.window_capture.target_height, self.window_capture.target_width, 3), dtype=np.uint8)
-            if max_y is not None:
-                frame = frame[:max_y, :]
-
         self._capture_cache[cache_key] = (now, frame)
         return frame
 
@@ -387,7 +969,7 @@ class EatventureBot:
             time.sleep(min(interval, remaining))
             if self._new_level_event.is_set():
                 return True
-            if self._should_interrupt_for_new_level(max_y=config.EXTENDED_SEARCH_Y, force=True, record_miss=False):
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return True
             now = time.monotonic()
         return False
@@ -397,8 +979,8 @@ class EatventureBot:
             return False
         return self._sleep_until(time.monotonic() + duration)
 
-    def _detect_new_level(self, screenshot=None, max_y=None, force=False, record_miss=True):
-        target_max_y = max_y if max_y is not None else config.EXTENDED_SEARCH_Y
+    def _detect_new_level(self, screenshot=None, max_y=None, force=False):
+        target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
         cached = self._new_level_cache
         if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= self._capture_cache_ttl:
@@ -411,13 +993,13 @@ class EatventureBot:
         result = self._find_new_level(screenshot, threshold=threshold)
         if result[0]:
             self.vision_optimizer.update_new_level_confidence(result[1])
-        elif record_miss:
+        else:
             self.vision_optimizer.update_new_level_miss()
         self._new_level_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
-    def _detect_new_level_red_icon(self, screenshot=None, max_y=None, force=False, record_miss=True):
-        target_max_y = max_y if max_y is not None else config.EXTENDED_SEARCH_Y
+    def _detect_new_level_red_icon(self, screenshot=None, max_y=None, force=False):
+        target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
         cached = self._new_level_red_icon_cache
         cache_ttl = config.NEW_LEVEL_RED_ICON_CACHE_TTL
@@ -491,18 +1073,17 @@ class EatventureBot:
         result = best_match or (False, 0.0, 0, 0)
         if result[0]:
             self.vision_optimizer.update_new_level_red_icon_confidence(result[1])
-        elif record_miss:
+        else:
             self.vision_optimizer.update_new_level_red_icon_miss()
 
         self._new_level_red_icon_cache = {"timestamp": now, "result": result, "max_y": target_max_y}
         return result
 
-    def _detect_new_level_priority(self, screenshot=None, max_y=None, force=False, record_miss=True):
+    def _detect_new_level_priority(self, screenshot=None, max_y=None, force=False):
         red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
             screenshot=screenshot,
             max_y=max_y,
             force=force,
-            record_miss=record_miss,
         )
         if red_found:
             self._mark_restaurant_completed("new level red icon", red_conf)
@@ -512,7 +1093,6 @@ class EatventureBot:
             screenshot=screenshot,
             max_y=max_y,
             force=force,
-            record_miss=record_miss,
         )
         if found:
             self._mark_restaurant_completed("new level button", confidence)
@@ -520,12 +1100,11 @@ class EatventureBot:
 
         return None
 
-    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False, record_miss=True):
+    def _should_interrupt_for_new_level(self, screenshot=None, max_y=None, force=False):
         priority_hit = self._detect_new_level_priority(
             screenshot=screenshot,
             max_y=max_y,
             force=force,
-            record_miss=record_miss,
         )
         if priority_hit:
             source, confidence, x, y = priority_hit
@@ -549,28 +1128,6 @@ class EatventureBot:
             logger.info("Restaurant completion detected via %s", source)
         else:
             logger.info("Restaurant completion detected via %s (confidence %.3f)", source, confidence)
-
-    def _finalize_level_completion(self):
-        self.total_levels_completed += 1
-
-        time_spent = 0
-        if self.current_level_start_time:
-            completion_time = self.completion_detected_time or datetime.now()
-            time_spent = (completion_time - self.current_level_start_time).total_seconds()
-
-        completion_source = self.completion_detected_by or "new level trigger"
-        self.current_level_start_time = datetime.now()
-        self.completion_detected_time = None
-        self.completion_detected_by = None
-
-        self.telegram.notify_new_level(self.total_levels_completed, time_spent)
-        self.historical_learner.record_completion(
-            time_spent,
-            completion_source,
-        )
-
-        logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
-        logger.info("Transition finalized")
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -856,7 +1413,7 @@ class EatventureBot:
 
     def _filter_forbidden_red_icons(self, red_icons):
         filtered_icons = []
-        forbidden_icons = []
+        forbidden_zone_count = 0
         forbidden_zones = self.forbidden_zones
 
         for conf, x, y in red_icons:
@@ -866,11 +1423,11 @@ class EatventureBot:
             )
 
             if in_forbidden:
-                forbidden_icons.append((conf, x, y))
+                forbidden_zone_count += 1
             else:
                 filtered_icons.append((conf, x, y))
 
-        return filtered_icons, forbidden_icons
+        return filtered_icons, forbidden_zone_count
 
     def _prioritize_red_icons(self, red_icons):
         def get_priority(icon):
@@ -899,11 +1456,11 @@ class EatventureBot:
         scroll_ratio = max(0.1, min(1.0, scroll_ratio))
 
         if direction == "up":
-            full_start_x, full_start_y = config.SCROLL_UP_START_POS
-            full_end_x, full_end_y = config.SCROLL_UP_END_POS
+            full_start_x, full_start_y = config.SCROLL_END_POS
+            full_end_x, full_end_y = config.SCROLL_START_POS
         else:
-            full_start_x, full_start_y = config.SCROLL_DOWN_START_POS
-            full_end_x, full_end_y = config.SCROLL_DOWN_END_POS
+            full_start_x, full_start_y = config.SCROLL_START_POS
+            full_end_x, full_end_y = config.SCROLL_END_POS
 
         end_x = int(full_start_x + (full_end_x - full_start_x) * scroll_ratio)
         end_y = int(full_start_y + (full_end_y - full_start_y) * scroll_ratio)
@@ -946,18 +1503,65 @@ class EatventureBot:
             state_holder["state"] = new_state
             stop_event.set()
 
+        def _detect_interrupt_assets(screenshot):
+            threshold = max(0.0, min(1.0, float(getattr(config, "SCROLL_INTERRUPT_ASSET_THRESHOLD", 0.93))))
+            asset_state_map = {
+                "unlock": State.CHECK_UNLOCK,
+                "upgradeStation": State.SEARCH_UPGRADE_STATION,
+            }
+            for asset_name in getattr(config, "SCROLL_INTERRUPT_ASSET_TEMPLATES", ()):
+                if asset_name.startswith("RedIcon"): # Skip red icons in background thread
+                    continue
+
+                template_data = self.templates.get(asset_name)
+                if not template_data:
+                    continue
+                template, mask = template_data
+                if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
+                    continue
+
+                found, confidence, _, _ = self.image_matcher.find_template(
+                    screenshot,
+                    template,
+                    mask=mask,
+                    threshold=threshold,
+                    template_name=f"{asset_name}-scroll-monitor",
+                )
+                if found:
+                    if asset_name.startswith("box"):
+                        target_state = State.OPEN_BOXES
+                    else:
+                        target_state = asset_state_map.get(asset_name, State.FIND_RED_ICONS)
+                    return asset_name, confidence, target_state
+            return None, 0.0, None
+
         def monitor_assets():
             interval = max(0.002, float(getattr(config, "SCROLL_ASSET_SCAN_INTERVAL", 0.008)))
+            full_scan_every = max(1, int(getattr(config, "SCROLL_ASSET_FULL_SCAN_EVERY", 2)))
+            scan_counter = 0
             while not stop_event.is_set():
-                screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+                screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+                scan_counter += 1
 
                 if self._should_interrupt_for_new_level(
                     screenshot=screenshot,
-                    max_y=config.EXTENDED_SEARCH_Y,
-                    record_miss=False,
+                    max_y=config.MAX_SEARCH_Y,
+                    force=True,
                 ):
                     _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level detected")
                     return
+
+                if scan_counter % full_scan_every == 0:
+                    asset_name, confidence, target_state = _detect_interrupt_assets(screenshot)
+                    if asset_name is not None and target_state is not None:
+                        logger.info(
+                            "Detected interrupt asset '%s' (%.2f%% confidence) -> %s",
+                            asset_name,
+                            confidence * 100,
+                            target_state.name,
+                        )
+                        _interrupt_to_main_cycle(target_state, f"Asset {asset_name} detected")
+                        return
 
                 time.sleep(interval)
 
@@ -971,35 +1575,14 @@ class EatventureBot:
         for from_x, from_y, to_x, to_y in segments:
             if stop_event.is_set():
                 break
-            
-            # Determine direction-specific duration and steps
-            if direction == "up":
-                final_duration = getattr(config, "SCROLL_UP_DURATION", segment_duration)
-                final_steps = getattr(config, "SCROLL_UP_STEP_COUNT", None)
-            else:
-                final_duration = getattr(config, "SCROLL_DOWN_DURATION", segment_duration)
-                final_steps = getattr(config, "SCROLL_DOWN_STEP_COUNT", None)
-            
-            # Re-calculate segment duration if using direction-specific total duration
-            if direction == "up" and hasattr(config, "SCROLL_UP_DURATION"):
-                final_seg_duration = max(0.001, config.SCROLL_UP_DURATION / max(1, len(segments)))
-            elif direction == "down" and hasattr(config, "SCROLL_DOWN_DURATION"):
-                final_seg_duration = max(0.001, config.SCROLL_DOWN_DURATION / max(1, len(segments)))
-            else:
-                final_seg_duration = segment_duration
-
-            success = self.mouse_controller.drag(
+            self.mouse_controller.drag(
                 from_x,
                 from_y,
                 to_x,
                 to_y,
-                duration=final_seg_duration,
+                duration=segment_duration,
                 relative=True,
-                steps=final_steps,
-                interrupt_callback=stop_event.is_set
             )
-            if not success or stop_event.is_set():
-                break
             if segment_settle_delay > 0:
                 time.sleep(segment_settle_delay)
             
@@ -1020,9 +1603,9 @@ class EatventureBot:
                 )
                 
                 if scroll_icons:
-                    filtered_icons, forbidden_icons = self._filter_forbidden_red_icons(scroll_icons)
-                    if forbidden_icons:
-                        logger.info(f"Forbidden Zone Filter: {len(forbidden_icons)} icons removed during scroll")
+                    filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(scroll_icons)
+                    if forbidden_zone_count > 0:
+                        logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed during scroll")
                     if filtered_icons:
                         self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in scroll_icons])
                         self.red_icons = self._prioritize_red_icons(filtered_icons)
@@ -1054,23 +1637,23 @@ class EatventureBot:
 
         self._click_idle()
 
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
         if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
         ):
             return State.TRANSITION_LEVEL
 
-        red_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
+        red_icons = self._detect_red_icons_in_view(limited_screenshot, max_y=config.MAX_SEARCH_Y)
         red_icons = self._stable_red_icons(red_icons)
         self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in red_icons])
         if not red_icons:
             return None
 
-        filtered_icons, forbidden_icons = self._filter_forbidden_red_icons(red_icons)
-        if forbidden_icons:
-            logger.info(f"Forbidden Zone Filter: {len(forbidden_icons)} icons removed during scroll")
+        filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(red_icons)
+        if forbidden_zone_count > 0:
+            logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed during scroll")
 
         if not filtered_icons:
             return None
@@ -1137,26 +1720,17 @@ class EatventureBot:
                 if self.vision_optimizer.enabled
                 else config.BOX_THRESHOLD
             )
-            
-            # Find all matches for this box template
-            matches = self.image_matcher.find_all_templates(
+            found, confidence, x, y = self.image_matcher.find_template(
                 screenshot,
                 template,
                 mask=mask,
                 threshold=box_threshold,
                 template_name=f"{box_name}-no-red-fallback",
-                min_distance=30
             )
 
-            min_matches = getattr(config, "BOX_MIN_MATCHES", 2)
-            
-            if len(matches) < min_matches:
-                if not matches:
-                    self.vision_optimizer.update_box_miss()
+            if not found:
+                self.vision_optimizer.update_box_miss()
                 continue
-
-            # Use the best match
-            confidence, x, y = max(matches, key=lambda m: m[0])
 
             if self.mouse_controller.is_in_forbidden_zone(x, y):
                 logger.debug("Fallback scan: %s in forbidden zone, skipping", box_name)
@@ -1295,8 +1869,8 @@ class EatventureBot:
         limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
 
         if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
             force=True,
         ):
             logger.info("New level detected during scan, transitioning")
@@ -1318,7 +1892,7 @@ class EatventureBot:
 
         red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
             screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            max_y=config.MAX_SEARCH_Y,
             force=True,
         )
         if red_found:
@@ -1340,29 +1914,27 @@ class EatventureBot:
             self.no_red_icons_found = True
             return State.SCROLL
         else:
-            filtered_icons, forbidden_icons = self._filter_forbidden_red_icons(self.red_icons)
-            if forbidden_icons:
-                logger.info(f"Forbidden Zone Filter: {len(forbidden_icons)} icons removed")
+            filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(self.red_icons)
+            if forbidden_zone_count > 0:
+                logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed")
             
             if not filtered_icons:
-                if forbidden_icons:
-                    logger.info(f"0 Safe / {len(forbidden_icons)} Forbidden icons detected → using main scroll search")
-                else:
-                    logger.info("0 Safe icons detected → using main scroll search")
-                
                 clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
                 if clicked_targets > 0:
-                    logger.info(f"Fallback success: clicked {clicked_targets} non-red assets. Proceeding to scroll.")
+                    logger.info(
+                        "Filtered red icons to zero; fallback clicked %s non-red assets. Proceeding to no-icon scrolling cycle.",
+                        clicked_targets,
+                    )
                     self.no_red_icons_found = True
                     return State.SCROLL
 
-                logger.info("No clickable red icons or fallback assets found; scrolling to search area")
+                logger.info("No valid red icons after filtering; no fallback assets found, scrolling to search")
                 self.no_red_icons_found = True
                 return State.SCROLL
             
-            # MATRIX CASE: 1+ Safe icons detected -> Proceed to Click
             self.red_icons = self._prioritize_red_icons(filtered_icons)
-            logger.info(f"✓ {len(self.red_icons)} Safe red icons ready to process")
+            
+            logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
             self.work_done = True
@@ -1375,16 +1947,7 @@ class EatventureBot:
             return State.OPEN_BOXES
         
         confidence, x, y = self.red_icons[self.current_red_icon_index]
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-
-        if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
-            force=True,
-        ):
-            return State.TRANSITION_LEVEL
-
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
         if not self._is_red_icon_present_at(x, y, screenshot=limited_screenshot):
             logger.info(
                 "Red icon no longer present at (%s, %s); skipping click",
@@ -1410,6 +1973,8 @@ class EatventureBot:
         
         if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
+            if self._scroll_away_from_forbidden_zone(click_y):
+                return State.FIND_RED_ICONS
             self.current_red_icon_index += 1
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
         
@@ -1422,16 +1987,8 @@ class EatventureBot:
         return State.CHECK_UNLOCK
     
     def handle_check_unlock(self, current_state):
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         
-        if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
-            force=True,
-        ):
-            return State.TRANSITION_LEVEL
-
         clicked_unlock = False
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
@@ -1450,7 +2007,7 @@ class EatventureBot:
         if clicked_unlock:
             if self._sleep_with_interrupt(config.STATE_DELAY):
                 return State.TRANSITION_LEVEL
-            return State.SEARCH_UPGRADE_STATION
+            return self.handle_search_upgrade_station(current_state)
 
         return State.SEARCH_UPGRADE_STATION
     
@@ -1465,16 +2022,8 @@ class EatventureBot:
         retry_delay = self.tuner.search_interval
         
         for attempt in range(max_attempts):
-            screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-            limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
             
-            if self._should_interrupt_for_new_level(
-                screenshot=screenshot,
-                max_y=config.EXTENDED_SEARCH_Y,
-                force=True,
-            ):
-                return State.TRANSITION_LEVEL
-
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
                 
@@ -1536,16 +2085,7 @@ class EatventureBot:
     
     def handle_hold_upgrade_station(self, current_state):
         base_pos = self.upgrade_station_pos
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
-
-        if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
-            force=True,
-        ):
-            return State.TRANSITION_LEVEL
-
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
         hold_threshold = (
             self.vision_optimizer.upgrade_station_threshold
             if self.vision_optimizer.enabled
@@ -1612,8 +2152,7 @@ class EatventureBot:
                     break
 
                 if now >= next_check_time:
-                    screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
-                    limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+                    limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
                     if "upgradeStation" in self.templates:
                         template, mask = self.templates["upgradeStation"]
@@ -1628,8 +2167,8 @@ class EatventureBot:
                             upgrade_missing_logged = True
 
                     if self._should_interrupt_for_new_level(
-                        screenshot=screenshot,
-                        max_y=config.EXTENDED_SEARCH_Y,
+                        screenshot=limited_screenshot,
+                        max_y=config.MAX_SEARCH_Y,
                         force=True,
                     ):
                         interrupt_state = State.TRANSITION_LEVEL
@@ -1667,8 +2206,8 @@ class EatventureBot:
         limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
 
         found, confidence, x, y = self._detect_new_level(
-            screenshot=extended_screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
         )
         if found:
             logger.info("New level detected during stats upgrade")
@@ -1705,10 +2244,10 @@ class EatventureBot:
             )
             elapsed = time.monotonic() - start_time
             if elapsed - last_new_level_check >= config.NEW_LEVEL_INTERRUPT_INTERVAL:
-                screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
                 if self._should_interrupt_for_new_level(
-                    screenshot=screenshot,
-                    max_y=config.EXTENDED_SEARCH_Y,
+                    screenshot=limited_screenshot,
+                    max_y=config.MAX_SEARCH_Y,
                 ):
                     return State.TRANSITION_LEVEL
                 last_new_level_check = elapsed
@@ -1720,12 +2259,11 @@ class EatventureBot:
     def handle_open_boxes(self, current_state):
         self._click_idle()
         
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
         found, confidence, x, y = self._detect_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
         )
         if found:
             logger.info("New level found, transitioning")
@@ -1742,24 +2280,12 @@ class EatventureBot:
                     if self.vision_optimizer.enabled
                     else config.BOX_THRESHOLD
                 )
-                
-                # Find all potential matches for this box template
-                matches = self.image_matcher.find_all_templates(
-                    limited_screenshot, 
-                    template, 
-                    mask=mask,
-                    threshold=box_threshold, 
-                    template_name=box_name,
-                    min_distance=30
+                found, confidence, x, y = self.image_matcher.find_template(
+                    limited_screenshot, template, mask=mask,
+                    threshold=box_threshold, template_name=box_name
                 )
                 
-                # Minimum match check (like red icons)
-                min_matches = getattr(config, "BOX_MIN_MATCHES", 2)
-                
-                if len(matches) >= min_matches:
-                    # Use the best match among the results
-                    confidence, x, y = max(matches, key=lambda m: m[0])
-                    
+                if found:
                     if self.mouse_controller.is_in_forbidden_zone(x, y):
                         logger.debug(f"{box_name} in forbidden zone, skipping")
                     else:
@@ -1767,11 +2293,10 @@ class EatventureBot:
                         boxes_found += 1
                         self.vision_optimizer.update_box_confidence(confidence)
                 else:
-                    if not matches:
-                        self.vision_optimizer.update_box_miss()
+                    self.vision_optimizer.update_box_miss()
         
         if self._should_interrupt_for_new_level(
-            max_y=config.EXTENDED_SEARCH_Y,
+            max_y=config.MAX_SEARCH_Y,
             force=True,
         ):
             logger.info("New level detected while opening boxes")
@@ -1805,11 +2330,11 @@ class EatventureBot:
     def handle_scroll(self, current_state):
         self._click_idle()
         
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
         found, confidence, x, y = self._detect_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
         )
         if found:
             logger.info("New level detected before scroll")
@@ -1817,34 +2342,41 @@ class EatventureBot:
         
         scroll_duration = config.NO_ICON_SCROLL_DURATION if self.no_red_icons_found else config.SCROLL_DURATION
 
-        direction = 'up' if self.scroll_direction == 'up' else 'down'
-        
         if self.no_red_icons_found:
-            max_count = config.NO_ICON_SCROLL_UP_COUNT if direction == 'up' else config.NO_ICON_SCROLL_DOWN_COUNT
-            logger.info(f"No red icons found → searching {direction.upper()} ({self.scroll_count + 1}/{max_count})")
-        else:
-            max_count = getattr(config, "NORMAL_SCROLL_UP_COUNT" if direction == 'up' else "NORMAL_SCROLL_DOWN_COUNT", self.max_scroll_count)
-            logger.info(f"{'⬆' if direction == 'up' else '⬇'} Scroll {direction.upper()} ({self.scroll_count + 1}/{max_count}, segmented)")
+            logger.info("No red icons found → running up/down scan scroll sequence")
+            for direction, count in (
+                ("up", config.NO_ICON_SCROLL_UP_COUNT),
+                ("down", config.NO_ICON_SCROLL_DOWN_COUNT),
+            ):
+                for _ in range(count):
+                    state = self._scroll_and_scan_for_red_icons(direction, scroll_duration)
+                    if state is not None:
+                        return state
+            return State.FIND_RED_ICONS
 
+        direction = 'up' if self.scroll_direction == 'up' else 'down'
+        logger.info(
+            f"{'⬆' if direction == 'up' else '⬇'} Scroll {direction.upper()} ({self.scroll_count + 1}/{self.max_scroll_count}, segmented)"
+        )
         interrupt_state = self._scroll_with_background_asset_detection(
             direction,
             scroll_duration,
             scan_for_red_icons=True,
         )
-        
-        # Always increment scroll count if we performed a drag action, 
-        # even if interrupted, to ensure we eventually swap directions.
-        self.scroll_count += 1
-        
-        if self.scroll_count >= max_count:
-            logger.info(f"Reached max scrolls ({max_count}) for direction {direction.upper()} → swapping")
-            self.scroll_direction = 'down' if self.scroll_direction == 'up' else 'up'
-            self.scroll_count = 0
-
         if interrupt_state is not None:
             return interrupt_state
 
         self._click_idle()
+        
+        self.scroll_count += 1
+        
+        if self.scroll_count >= self.max_scroll_count:
+            if self.scroll_direction == 'up':
+                self.scroll_direction = 'down'
+            else:
+                self.scroll_direction = 'up'
+            self.scroll_count = 0
+        
         return State.FIND_RED_ICONS
     
     def handle_check_new_level(self, current_state):
@@ -1853,27 +2385,28 @@ class EatventureBot:
             if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
                 return State.TRANSITION_LEVEL
 
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
+            screenshot=limited_screenshot,
+            max_y=config.MAX_SEARCH_Y,
         ):
             return State.TRANSITION_LEVEL
         
-        logger.info("Clicking new level position")
-        self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
+        logger.info("Clicking new level button position")
+        self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
         if config.NEW_LEVEL_BUTTON_DELAY > 0:
             if self._sleep_with_interrupt(config.NEW_LEVEL_BUTTON_DELAY):
                 return State.TRANSITION_LEVEL
         
-        logger.info("Triggering transition click (Fly to New City)")
-        self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+        logger.info("Triggering follow-up click after new level check")
+        self.mouse_controller.click(166, 526, relative=True)
         if config.NEW_LEVEL_FOLLOWUP_DELAY > 0:
             if self._sleep_with_interrupt(config.NEW_LEVEL_FOLLOWUP_DELAY):
                 return State.TRANSITION_LEVEL
 
-        self._finalize_level_completion()
-        return State.WAIT_FOR_UNLOCK
+        self.scroll_direction = 'down'
+        self.scroll_count = 0
+        return State.FIND_RED_ICONS
     
     def handle_transition_level(self, current_state):
         self._click_idle()
@@ -1881,31 +2414,39 @@ class EatventureBot:
         max_attempts = 5
         
         for attempt in range(max_attempts):
-            screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
             found, confidence, x, y = self._detect_new_level(
-                screenshot=screenshot,
-                max_y=config.EXTENDED_SEARCH_Y,
+                screenshot=limited_screenshot,
+                max_y=config.MAX_SEARCH_Y,
             )
             if found:
                 self._mark_restaurant_completed("new level button", confidence)
-                logger.info(f"New level button found (attempt {attempt + 1})")
-                
-                # Clicking NEW_LEVEL_POS as requested by the user
-                logger.info("Clicking new level position")
-                self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
+                logger.info(f"New level button found at ({x}, {y}) (attempt {attempt + 1})")
+                self.mouse_controller.click(x, y, relative=True)
                 if config.TRANSITION_POST_CLICK_DELAY > 0:
                     if self._sleep_with_interrupt(config.TRANSITION_POST_CLICK_DELAY):
                         return State.TRANSITION_LEVEL
 
-                # Click the transition button (Fly to New City) which appears after clicking the new level button
-                logger.info("Clicking level transition button (Fly to New City)")
-                self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
-                if config.TRANSITION_POST_CLICK_DELAY > 0:
-                    if self._sleep_with_interrupt(config.TRANSITION_POST_CLICK_DELAY):
-                        return State.TRANSITION_LEVEL
+                self.total_levels_completed += 1
 
-                self._finalize_level_completion()
+                time_spent = 0
+                if self.current_level_start_time:
+                    completion_time = self.completion_detected_time or datetime.now()
+                    time_spent = (completion_time - self.current_level_start_time).total_seconds()
+
+                completion_source = self.completion_detected_by or "new level button"
+                self.current_level_start_time = datetime.now()
+                self.completion_detected_time = None
+                self.completion_detected_by = None
+
+                self.telegram.notify_new_level(self.total_levels_completed, time_spent)
+                self.historical_learner.record_completion(
+                    time_spent,
+                    completion_source,
+                )
+
+                logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
                 logger.info("Waiting for unlock button after level transition")
                 return State.WAIT_FOR_UNLOCK
             
@@ -1915,7 +2456,7 @@ class EatventureBot:
                         return State.TRANSITION_LEVEL
         
         logger.warning("New level button not found after 5 attempts")
-        self.scroll_direction = 'up'
+        self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
     
@@ -1935,14 +2476,7 @@ class EatventureBot:
             self.scroll_count = 0
             return State.FIND_RED_ICONS
         
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-
-        if self._should_interrupt_for_new_level(
-            screenshot=screenshot,
-            max_y=config.EXTENDED_SEARCH_Y,
-            force=True,
-        ):
-            return State.TRANSITION_LEVEL
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
         if "unlock" in self.templates:
             template, mask = self.templates["unlock"]
