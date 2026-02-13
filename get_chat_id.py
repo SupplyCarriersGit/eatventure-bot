@@ -22,7 +22,7 @@ if not bot_token:
 url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
 
 try:
-    response = requests.get(url)
+    response = requests.get(url, timeout=10)
     data = response.json()
     
     if data.get("ok"):

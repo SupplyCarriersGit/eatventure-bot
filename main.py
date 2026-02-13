@@ -104,6 +104,7 @@ def main():
             if config.MAIN_LOOP_DELAY > 0:
                 time.sleep(config.MAIN_LOOP_DELAY)
         
+        bot.stop()
         logger.info("Program exiting...")
         
     except KeyboardInterrupt:

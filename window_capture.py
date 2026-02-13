@@ -62,14 +62,25 @@ class WindowCapture:
         return x, y, width, height
     
     def capture(self, max_y=None):
-        if not self.hwnd:
-            self.find_window()
+        if not self.hwnd or not win32gui.IsWindow(self.hwnd):
+            try:
+                self.find_window()
+            except Exception as e:
+                logger.error(f"Capture failed: {e}")
+                return self._placeholder_frame(max_y)
         
-        x, y, width, height = self.get_window_rect()
+        try:
+            x, y, width, height = self.get_window_rect()
+        except Exception as e:
+            logger.error(f"Failed to get window rect: {e}")
+            return self._placeholder_frame(max_y)
         
         if max_y is not None:
             height = min(height, max_y)
         
+        if width <= 0 or height <= 0:
+            return self._placeholder_frame(max_y)
+
         hwndDC = win32gui.GetWindowDC(self.hwnd)
         mfcDC = win32ui.CreateDCFromHandle(hwndDC)
         saveDC = mfcDC.CreateCompatibleDC()
@@ -78,22 +89,32 @@ class WindowCapture:
         saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
         saveDC.SelectObject(saveBitMap)
         
-        result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
-        
-        bmpinfo = saveBitMap.GetInfo()
-        bmpstr = saveBitMap.GetBitmapBits(True)
-        img = np.frombuffer(bmpstr, dtype=np.uint8)
-        img.shape = (height, width, 4)
-        
-        win32gui.DeleteObject(saveBitMap.GetHandle())
-        saveDC.DeleteDC()
-        mfcDC.DeleteDC()
-        win32gui.ReleaseDC(self.hwnd, hwndDC)
-        
-        img = img[:, :, :3]
-        img = np.ascontiguousarray(img)
-        
-        return img
+        try:
+            result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
+            if not result:
+                # Fallback or error handling
+                logger.error("PrintWindow failed to capture window.")
+                return self._placeholder_frame(max_y)
+            
+            bmpstr = saveBitMap.GetBitmapBits(True)
+            img = np.frombuffer(bmpstr, dtype=np.uint8)
+            img.shape = (height, width, 4)
+            
+            img = img[:, :, :3]
+            img = np.ascontiguousarray(img)
+            
+            return img
+        finally:
+            win32gui.DeleteObject(saveBitMap.GetHandle())
+            saveDC.DeleteDC()
+            mfcDC.DeleteDC()
+            win32gui.ReleaseDC(self.hwnd, hwndDC)
+
+    def _placeholder_frame(self, max_y=None):
+        h = self.target_height
+        if max_y is not None:
+            h = min(h, max_y)
+        return np.zeros((h, self.target_width, 3), dtype=np.uint8)
     
     def is_window_active(self):
         return win32gui.IsWindow(self.hwnd) if self.hwnd else False
@@ -118,9 +139,10 @@ class ForbiddenAreaOverlay:
         self.running = False
         if self.overlay_hwnd:
             try:
-                win32gui.DestroyWindow(self.overlay_hwnd)
-            except:
-                pass
+                # Post WM_CLOSE to allow the window thread to destroy itself safely
+                win32gui.PostMessage(self.overlay_hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception as e:
+                logger.error(f"Error closing overlay window: {e}")
             self.overlay_hwnd = None
         logger.info("Forbidden area overlay stopped")
     
@@ -173,6 +195,11 @@ class ForbiddenAreaOverlay:
             
             last_pos = target_pos
             while self.running:
+                win32gui.PumpWaitingMessages()
+                if not win32gui.IsWindow(self.target_hwnd):
+                    logger.info("Target window lost, stopping overlay")
+                    break
+                    
                 try:
                     new_pos = win32gui.ClientToScreen(self.target_hwnd, (0, 0))
                     if new_pos != last_pos:
@@ -190,13 +217,18 @@ class ForbiddenAreaOverlay:
                     logger.error(f"Error in overlay update loop: {e}")
                     break
                 
-                import time
                 time.sleep(0.1)
                 
         except Exception as e:
             logger.error(f"Failed to create overlay window: {e}")
         finally:
             self.running = False
+            if self.overlay_hwnd:
+                try:
+                    win32gui.DestroyWindow(self.overlay_hwnd)
+                except:
+                    pass
+                self.overlay_hwnd = None
     
     def _draw_zones(self):
         if not self.overlay_hwnd:
