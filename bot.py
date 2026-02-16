@@ -708,11 +708,12 @@ class EatventureBot:
                 time.sleep(max(interval, 0.01))
                 continue
 
-            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+            monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
+            limited_screenshot = monitor_screenshot[:config.MAX_SEARCH_Y, :]
 
             red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
-                screenshot=limited_screenshot,
-                max_y=config.MAX_SEARCH_Y,
+                screenshot=monitor_screenshot,
+                max_y=config.EXTENDED_SEARCH_Y,
                 force=True,
             )
             if red_found:
@@ -835,10 +836,10 @@ class EatventureBot:
             self.no_red_icons_found = True
             return State.SCROLL
 
-        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        priority_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
-            screenshot=limited_screenshot,
-            max_y=config.MAX_SEARCH_Y,
+            screenshot=priority_screenshot,
+            max_y=config.EXTENDED_SEARCH_Y,
             force=True,
         )
         if priority_hit:
@@ -1015,9 +1016,6 @@ class EatventureBot:
         if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
             return cached["result"]
 
-        if screenshot is None:
-            screenshot = self._capture(max_y=target_max_y, force=force)
-
         max_template_width = 0
         max_template_height = 0
         for _, template, _ in self._iter_red_icon_templates():
@@ -1031,9 +1029,12 @@ class EatventureBot:
         # If callers provide a cropped frame (e.g. MAX_SEARCH_Y), the ROI can
         # be clipped out entirely and produce guaranteed false negatives.
         required_bottom = config.NEW_LEVEL_RED_ICON_Y_MAX + roi_pad_y
-        if screenshot.shape[0] < required_bottom:
+        if screenshot is None:
+            screenshot = self._capture(max_y=target_max_y, force=force)
+
+        if screenshot.shape[0] < required_bottom and max_y is None:
             recapture_max_y = max(target_max_y, required_bottom)
-            screenshot = self._capture(max_y=recapture_max_y, force=True)
+            screenshot = self._capture(max_y=recapture_max_y, force=force)
             target_max_y = recapture_max_y
 
         height, width = screenshot.shape[:2]
