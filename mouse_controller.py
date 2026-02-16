@@ -10,9 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class MouseController:
-    def __init__(self, hwnd, click_delay=0.1):
+    def __init__(self, hwnd, click_delay=0.1, move_delay=0.004):
         self.hwnd = hwnd
         self.click_delay = click_delay
+        self.move_delay = move_delay
         self._last_click_time = 0.0
         self._last_cursor_pos = None
         self._last_drag_time = 0.0
@@ -151,7 +152,7 @@ class MouseController:
             if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
                 break
 
-        time.sleep(config.MOUSE_MOVE_DELAY)
+        time.sleep(self.move_delay)
         self._last_cursor_pos = target
 
     def _estimate_cursor_distance(self, screen_x, screen_y):
@@ -221,41 +222,11 @@ class MouseController:
                 time.sleep(check_interval)
     
     def is_in_forbidden_zone(self, x, y):
-        if (y >= config.FORBIDDEN_CLICK_Y_MIN and 
-            config.FORBIDDEN_CLICK_X_MIN <= x <= config.FORBIDDEN_CLICK_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_CLICK zone")
-            return True
-        
-        if (config.FORBIDDEN_ZONE_1_Y_MIN <= y <= config.FORBIDDEN_ZONE_1_Y_MAX and
-            config.FORBIDDEN_ZONE_1_X_MIN <= x <= config.FORBIDDEN_ZONE_1_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_1")
-            return True
-        
-        if (config.FORBIDDEN_ZONE_2_Y_MIN <= y <= config.FORBIDDEN_ZONE_2_Y_MAX and
-            config.FORBIDDEN_ZONE_2_X_MIN <= x <= config.FORBIDDEN_ZONE_2_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_2")
-            return True
-        
-        if (config.FORBIDDEN_ZONE_3_Y_MIN <= y <= config.FORBIDDEN_ZONE_3_Y_MAX and
-            config.FORBIDDEN_ZONE_3_X_MIN <= x <= config.FORBIDDEN_ZONE_3_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_3")
-            return True
-        
-        if (config.FORBIDDEN_ZONE_4_Y_MIN <= y <= config.FORBIDDEN_ZONE_4_Y_MAX and
-            config.FORBIDDEN_ZONE_4_X_MIN <= x <= config.FORBIDDEN_ZONE_4_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_4")
-            return True
-        
-        if (config.FORBIDDEN_ZONE_5_Y_MIN <= y <= config.FORBIDDEN_ZONE_5_Y_MAX and
-            config.FORBIDDEN_ZONE_5_X_MIN <= x <= config.FORBIDDEN_ZONE_5_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_5")
-            return True
-
-        if (config.FORBIDDEN_ZONE_6_Y_MIN <= y <= config.FORBIDDEN_ZONE_6_Y_MAX and
-            config.FORBIDDEN_ZONE_6_X_MIN <= x <= config.FORBIDDEN_ZONE_6_X_MAX):
-            logger.warning(f"Coordinates ({x}, {y}) blocked - FORBIDDEN_ZONE_6")
-            return True
-        
+        for zone in getattr(config, "FORBIDDEN_ZONES", []):
+            if (zone["y_min"] <= y <= zone["y_max"] and
+                zone["x_min"] <= x <= zone["x_max"]):
+                logger.warning(f"Coordinates ({x}, {y}) blocked - {zone['name']}")
+                return True
         return False
     
     def get_window_position(self):
@@ -370,7 +341,7 @@ class MouseController:
             self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
             self._correct_cursor_position(int(screen_from_x), int(screen_from_y))
             self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
-            time.sleep(config.MOUSE_MOVE_DELAY)
+            time.sleep(self.move_delay)
 
             win32api.mouse_event(
                 win32con.MOUSEEVENTF_LEFTDOWN,

@@ -33,21 +33,21 @@ def on_press(key):
             elif key.char == 'z':
                 logger = logging.getLogger(__name__)
                 if bot_instance:
-                    bot_instance.running = not bot_instance.running
-                    if bot_instance.running:
-                        logger.info("[Z pressed] Bot STARTED")
+                    if not bot_instance.running:
+                        bot_instance.start()
                         from datetime import datetime
                         bot_instance.current_level_start_time = datetime.now()
                         bot_instance.telegram.notify_bot_started()
                     else:
-                        logger.info("[Z pressed] Bot STOPPED")
+                        bot_instance.stop()
                         bot_instance.telegram.notify_bot_stopped()
             elif key.char == 'p':
                 logger = logging.getLogger(__name__)
                 logger.info("[P pressed] Exiting program...")
                 should_exit = True
     except Exception as e:
-        pass
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in keyboard listener: {e}")
 
 
 def setup_logging():
