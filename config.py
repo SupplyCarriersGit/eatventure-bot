@@ -21,11 +21,10 @@ RED_ICON_REFINE_RADIUS = 18
 RED_ICON_REFINE_THRESHOLD_DROP = 0.02
 RED_ICON_PRIORITY_TEMPLATE_LIMIT = 8
 # Process at most this many red icons per FIND_RED_ICONS scan.
-# Keeping this at 1 avoids stale multi-icon queues that can trigger
-# rapid cross-interactions between unrelated assets.
-RED_ICON_MAX_PER_SCAN = 1
+# Increasing this to 2 improves throughput for stationary assets.
+RED_ICON_MAX_PER_SCAN = 2
 STATS_RED_ICON_THRESHOLD = 0.97
-SEARCH_INTERVAL = 0.2
+SEARCH_INTERVAL = 0.1
 CLICK_DELAY = 0.036
 MOUSE_MOVE_DELAY = 0.004
 MOUSE_DOWN_UP_DELAY = 0.006
@@ -65,16 +64,16 @@ ShowForbiddenArea = False
 # Telegram Bot Configuration
 # TELEGRAM_ENABLED: Master switch to enable/disable all Telegram notifications
 # Set to True if you want to receive any Telegrazm messages from the bot
-TELEGRAM_ENABLED = False
+TELEGRAM_ENABLED = True
 
 # TELEGRAM_BOT_TOKEN: Your Telegram bot API token from @BotFather
 # To get one: Message @BotFather on Telegram, use /newbot command
-TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_BOT_TOKEN = "8244889019:AAFFqf1dn4d3LbHf3tenOXEBaoruj3FWkR0"
 
 # TELEGRAM_CHAT_ID: Your Telegram chat ID to receive messages
 # To get it: Message your bot, then visit: https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 # Look for "chat":{"id": YOUR_CHAT_ID in the response
-TELEGRAM_CHAT_ID = ""
+TELEGRAM_CHAT_ID = "770506304"
 
 # Red Icon Detection
 MAX_SEARCH_Y = 660
@@ -82,7 +81,7 @@ EXTENDED_SEARCH_Y = 710
 
 # Click Positions (relative to window)
 UPGRADE_POS = (320, 726)
-NEW_LEVEL_POS = (40, 700)
+NEW_LEVEL_POS = (171, 434)
 REDICON_CHECK_POS = (60, 704)
 LEVEL_TRANSITION_POS = (174, 520)
 IDLE_CLICK_POS = (2, 390)
@@ -99,28 +98,28 @@ NEW_LEVEL_BUTTON_POS = (30, 692)
 UPGRADE_STATION_THRESHOLD = 0.95
 UPGRADE_STATION_COLOR_CHECK = False
 BOX_THRESHOLD = 0.97
-UNLOCK_THRESHOLD = 0.9
-NEW_LEVEL_THRESHOLD = 0.92
+UNLOCK_THRESHOLD = 0.95
+NEW_LEVEL_THRESHOLD = 0.98
 
 # Bot Behavior Configuration
 RED_ICON_CYCLE_COUNT = 3
 STATS_UPGRADE_CLICK_DURATION = 2
 STATS_UPGRADE_CLICK_DELAY = 0.006
 STATS_ICON_PADDING = 20
-CAPTURE_CACHE_TTL = 0.015
+CAPTURE_CACHE_TTL = 0.008
 NEW_LEVEL_RED_ICON_CACHE_TTL = 0.01
 RED_ICON_STABILITY_CACHE_TTL = 0.18
 RED_ICON_STABILITY_RADIUS = 14
 RED_ICON_STABILITY_MIN_HITS = 2
 RED_ICON_STABILITY_MAX_HISTORY = 10
-UPGRADE_HOLD_DURATION = 4.6
+UPGRADE_HOLD_DURATION = 8.75
 UPGRADE_CLICK_INTERVAL = 0.008
 SCROLL_UP_CYCLES = 12
 NEW_LEVEL_INTERRUPT_INTERVAL = 0.02
-NEW_LEVEL_MONITOR_INTERVAL = 0.02
+NEW_LEVEL_MONITOR_INTERVAL = 0.01
 NEW_LEVEL_OVERRIDE_COOLDOWN = 0.25
-NO_ICON_SCROLL_UP_COUNT = 20
-NO_ICON_SCROLL_DOWN_COUNT = 30
+NO_ICON_SCROLL_UP_COUNT = 8
+NO_ICON_SCROLL_DOWN_COUNT = 6
 
 # Red Icon Detection Offsets
 RED_ICON_OFFSET_X = 10
@@ -138,20 +137,20 @@ UPGRADE_RED_ICON_Y_MIN = 665
 UPGRADE_RED_ICON_Y_MAX = 680
 
 # State Machine Settings
-STATE_DELAY = 0.006
+STATE_DELAY = 0.01
 MAX_SCROLL_CYCLES = 15
-MAIN_LOOP_DELAY = 0.005
-STATE_MIN_INTERVAL_DEFAULT = 0.007
+MAIN_LOOP_DELAY = 0.01
+STATE_MIN_INTERVAL_DEFAULT = 0.01
 STATE_MIN_INTERVALS = {
-    "FIND_RED_ICONS": 0.009,
-    "OPEN_BOXES": 0.009,
+    "FIND_RED_ICONS": 0.01,
+    "OPEN_BOXES": 0.01,
     "SCROLL": 0.1,
 }
 SCROLL_DURATION = 1.0
 NO_ICON_SCROLL_DURATION = 0.8
 SCROLL_STEP_COUNT = 50
 SCROLL_MIN_INTERVAL = 0.01
-SCROLL_SETTLE_DELAY = 0.4
+SCROLL_SETTLE_DELAY = 0.15
 SCROLL_SEGMENTS = 1
 SCROLL_MIN_SEGMENT_DISTANCE = 30
 SCROLL_SEGMENT_SETTLE_DELAY = 0.0
@@ -191,12 +190,13 @@ UPGRADE_SEARCH_INTERVAL = 0.02
 UPGRADE_CHECK_INTERVAL = 0.045
 IDLE_CLICK_SETTLE_DELAY = 0.006
 IDLE_CLICK_COOLDOWN = 0.06
-NEW_LEVEL_BUTTON_DELAY = 0.03
-NEW_LEVEL_FOLLOWUP_DELAY = 0.02
-TRANSITION_POST_CLICK_DELAY = 0.28
-TRANSITION_RETRY_DELAY = 0.04
-UNLOCK_POST_CLICK_DELAY = 0.1
-WAIT_UNLOCK_RETRY_DELAY = 0.06
+NEW_LEVEL_BUTTON_DELAY = 0.5
+NEW_LEVEL_FOLLOWUP_DELAY = 0.3
+TRANSITION_POST_CLICK_DELAY = 0.5
+TRANSITION_RETRY_DELAY = 0.1
+UNLOCK_POST_CLICK_DELAY = 0.5
+WAIT_UNLOCK_RETRY_DELAY = 0.1
+WAIT_FOR_UNLOCK_MAX_ATTEMPTS = 60
 FORBIDDEN_ICON_MAX_SCROLLS = 3
 FORBIDDEN_ICON_SCROLL_DURATION = 0.5
 FORBIDDEN_ICON_SCROLL_COOLDOWN = 0.008
@@ -263,46 +263,55 @@ AI_LEARNING_APPLY_COOLDOWN = 1.2
 
 # Forbidden Zones Configuration
 # These zones prevent the bot from clicking on critical UI elements
-# Each zone is defined by: X_MIN, X_MAX, Y_MIN, Y_MAX coordinates
-# You can add more zones by following the same pattern (FORBIDDEN_ZONE_7, etc.)
-
-# General forbidden click area (botom bar)
-FORBIDDEN_CLICK_X_MIN = 60
-FORBIDDEN_CLICK_X_MAX = 280
-FORBIDDEN_CLICK_Y_MIN = 668
-
-# Zone 1: Right side menu area
-FORBIDDEN_ZONE_1_X_MIN = 290
-FORBIDDEN_ZONE_1_X_MAX = 350
-FORBIDDEN_ZONE_1_Y_MIN = 93
-FORBIDDEN_ZONE_1_Y_MAX = 270
-
-# Zone 2: Left side top menu area
-FORBIDDEN_ZONE_2_X_MIN = 0
-FORBIDDEN_ZONE_2_X_MAX = 60
-FORBIDDEN_ZONE_2_Y_MIN = 50
-FORBIDDEN_ZONE_2_Y_MAX = 280
-
-# Zone 3: Left side bottom menu area
-FORBIDDEN_ZONE_3_X_MIN = 0
-FORBIDDEN_ZONE_3_X_MAX = 60
-FORBIDDEN_ZONE_3_Y_MIN = 590
-FORBIDDEN_ZONE_3_Y_MAX = 667
-
-# Zone 4: Top center notification area
-FORBIDDEN_ZONE_4_X_MIN = 145
-FORBIDDEN_ZONE_4_X_MAX = 200
-FORBIDDEN_ZONE_4_Y_MIN = 65
-FORBIDDEN_ZONE_4_Y_MAX = 110
-
-# Zone 5: Bottom navigation bar
-FORBIDDEN_ZONE_5_X_MIN = 55
-FORBIDDEN_ZONE_5_X_MAX = 285
-FORBIDDEN_ZONE_5_Y_MIN = 660
-FORBIDDEN_ZONE_5_Y_MAX = 725
-
-# Zone 6: Top bar area
-FORBIDDEN_ZONE_6_X_MIN = 0
-FORBIDDEN_ZONE_6_X_MAX = 360
-FORBIDDEN_ZONE_6_Y_MIN = 0
-FORBIDDEN_ZONE_6_Y_MAX = 70
+# Each zone is defined as a dictionary with 'name', 'x_min', 'x_max', 'y_min', and 'y_max'
+FORBIDDEN_ZONES = [
+    {
+        "name": "General bottom bar",
+        "x_min": 60,
+        "x_max": 280,
+        "y_min": 668,
+        "y_max": 1000  # Large value to cover until bottom
+    },
+    {
+        "name": "Zone 1: Right side menu area",
+        "x_min": 290,
+        "x_max": 350,
+        "y_min": 93,
+        "y_max": 270
+    },
+    {
+        "name": "Zone 2: Left side top menu area",
+        "x_min": 0,
+        "x_max": 60,
+        "y_min": 50,
+        "y_max": 280
+    },
+    {
+        "name": "Zone 3: Left side bottom menu area",
+        "x_min": 0,
+        "x_max": 60,
+        "y_min": 590,
+        "y_max": 667
+    },
+    {
+        "name": "Zone 4: Top center notification area",
+        "x_min": 145,
+        "x_max": 200,
+        "y_min": 65,
+        "y_max": 110
+    },
+    {
+        "name": "Zone 5: Bottom navigation bar",
+        "x_min": 55,
+        "x_max": 285,
+        "y_min": 660,
+        "y_max": 725
+    },
+    {
+        "name": "Zone 6: Top bar area",
+        "x_min": 0,
+        "x_max": 360,
+        "y_min": 0,
+        "y_max": 70
+    }
+]

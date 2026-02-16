@@ -375,11 +375,18 @@ class HistoricalLearner:
             self._total_completions = int(persisted.get("total_completions", len(self._records)))
             self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
             self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
+            self._tuned_behavior = persisted.get("tuned_behavior", {})
+
+            if self._tuned_behavior:
+                logger.info("Historical learner applying persisted behavior profile")
+                self.bot.apply_learned_behavior(self._tuned_behavior, reason="persisted")
 
             max_pair_processed = self._total_completions // self.pair_window
             max_batch_processed = self._total_completions // self.batch_window
             self._last_pair_processed = min(self._last_pair_processed, max_pair_processed)
             self._last_batch_processed = min(self._last_batch_processed, max_batch_processed)
+        else:
+            self._tuned_behavior = {}
 
     def start(self):
         if not self.enabled:
@@ -530,44 +537,8 @@ class HistoricalLearner:
             config.AI_LEARNING_MAX_SEARCH_INTERVAL,
         )
 
+        self._tuned_behavior = tuned
         self.bot.apply_learned_behavior(tuned, reason=label, best_time=record.get("time_spent", 0.0))
-
-        if self.auto_write_config:
-            try:
-                self._write_config_updates(tuned)
-            except OSError as exc:
-                logger.warning("Historical learner could not update config.py: %s", exc)
-            except Exception:
-                logger.exception("Unexpected error while persisting learned config")
-
-    def _write_config_updates(self, tuned):
-        mapping = {
-            "CLICK_DELAY": tuned.get("click_delay"),
-            "MOUSE_MOVE_DELAY": tuned.get("move_delay"),
-            "UPGRADE_CLICK_INTERVAL": tuned.get("upgrade_click_interval"),
-            "UPGRADE_SEARCH_INTERVAL": tuned.get("search_interval"),
-        }
-        config_path = os.path.join(os.path.dirname(__file__), "config.py")
-        if not os.path.exists(config_path):
-            return
-
-        with open(config_path, "r", encoding="utf-8") as handle:
-            content = handle.read()
-
-        changed = False
-        for key, value in mapping.items():
-            if value is None:
-                continue
-            replacement = f"{key} = {float(value):.6f}"
-            pattern = rf"^{key}\s*=\s*[^\n]+"
-            updated, count = re.subn(pattern, replacement, content, count=1, flags=re.MULTILINE)
-            if count:
-                content = updated
-                changed = True
-
-        if changed:
-            with open(config_path, "w", encoding="utf-8") as handle:
-                handle.write(content)
 
     def _persist(self):
         if not self.persistence:
@@ -577,6 +548,7 @@ class HistoricalLearner:
             "total_completions": self._total_completions,
             "last_pair_processed": self._last_pair_processed,
             "last_batch_processed": self._last_batch_processed,
+            "tuned_behavior": self._tuned_behavior,
         }
         self.persistence.save(state)
 
@@ -589,7 +561,8 @@ class EatventureBot:
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
         self.mouse_controller = MouseController(
             self.window_capture.hwnd,
-            config.CLICK_DELAY
+            config.CLICK_DELAY,
+            config.MOUSE_MOVE_DELAY
         )
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
         
@@ -611,7 +584,7 @@ class EatventureBot:
         self.red_icons = []
         self.current_red_icon_index = 0
         self.wait_for_unlock_attempts = 0
-        self.max_wait_for_unlock_attempts = 4
+        self.max_wait_for_unlock_attempts = getattr(config, "WAIT_FOR_UNLOCK_MAX_ATTEMPTS", 50)
         
         self.scroll_direction = 'down'
         self.scroll_count = 0
@@ -655,31 +628,18 @@ class EatventureBot:
         self._new_level_monitor_thread = None
         self._last_upgrade_station_pos = None
         self._last_new_level_override_time = 0.0
+        self._last_new_level_fail_time = 0.0
         self._last_idle_click_time = 0.0
         self._state_last_run_at = {}
         self._recent_red_icon_history = []
         self._no_red_scroll_cycle_pending = False
 
         self.forbidden_zones = [
-            (config.FORBIDDEN_ZONE_1_X_MIN, config.FORBIDDEN_ZONE_1_X_MAX,
-             config.FORBIDDEN_ZONE_1_Y_MIN, config.FORBIDDEN_ZONE_1_Y_MAX),
-            (config.FORBIDDEN_ZONE_2_X_MIN, config.FORBIDDEN_ZONE_2_X_MAX,
-             config.FORBIDDEN_ZONE_2_Y_MIN, config.FORBIDDEN_ZONE_2_Y_MAX),
-            (config.FORBIDDEN_ZONE_3_X_MIN, config.FORBIDDEN_ZONE_3_X_MAX,
-             config.FORBIDDEN_ZONE_3_Y_MIN, config.FORBIDDEN_ZONE_3_Y_MAX),
-            (config.FORBIDDEN_ZONE_4_X_MIN, config.FORBIDDEN_ZONE_4_X_MAX,
-             config.FORBIDDEN_ZONE_4_Y_MIN, config.FORBIDDEN_ZONE_4_Y_MAX),
-            (config.FORBIDDEN_ZONE_5_X_MIN, config.FORBIDDEN_ZONE_5_X_MAX,
-             config.FORBIDDEN_ZONE_5_Y_MIN, config.FORBIDDEN_ZONE_5_Y_MAX),
-            (config.FORBIDDEN_ZONE_6_X_MIN, config.FORBIDDEN_ZONE_6_X_MAX,
-             config.FORBIDDEN_ZONE_6_Y_MIN, config.FORBIDDEN_ZONE_6_Y_MAX),
+            (zone["x_min"], zone["x_max"], zone["y_min"], zone["y_max"])
+            for zone in getattr(config, "FORBIDDEN_ZONES", [])
         ]
 
         self.overlay = None
-        if config.ShowForbiddenArea:
-            self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
-            self.overlay.start()
-            logger.info("Forbidden area overlay enabled and started")
         
         logger.info("Bot initialized successfully")
 
@@ -740,7 +700,7 @@ class EatventureBot:
         if not self.tuner.enabled:
             return
         self.mouse_controller.click_delay = self.tuner.click_delay
-        config.MOUSE_MOVE_DELAY = self.tuner.move_delay
+        self.mouse_controller.move_delay = self.tuner.move_delay
 
     def _click_idle(self, wait_after=True):
         now = time.monotonic()
@@ -809,6 +769,9 @@ class EatventureBot:
         return True
 
     def resolve_priority_state(self, current_state):
+        if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL, State.WAIT_FOR_UNLOCK):
+            return None
+
         if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
             logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
             self._no_red_scroll_cycle_pending = False
@@ -828,12 +791,6 @@ class EatventureBot:
                 self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
-
-        if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
-            logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
-            self._no_red_scroll_cycle_pending = False
-            self.no_red_icons_found = True
-            return State.SCROLL
 
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
@@ -921,6 +878,21 @@ class EatventureBot:
         self._mark_restaurant_completed(source or "priority override")
 
         logger.info(
+            "Priority override: clicking new level button position at (%s, %s)",
+            config.NEW_LEVEL_BUTTON_POS[0],
+            config.NEW_LEVEL_BUTTON_POS[1],
+        )
+        self.mouse_controller.click(
+            config.NEW_LEVEL_BUTTON_POS[0],
+            config.NEW_LEVEL_BUTTON_POS[1],
+            relative=True,
+        )
+
+        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+        if button_delay > 0:
+            time.sleep(button_delay)
+
+        logger.info(
             "Priority override: clicking new level position at (%s, %s)",
             config.NEW_LEVEL_POS[0],
             config.NEW_LEVEL_POS[1],
@@ -931,7 +903,6 @@ class EatventureBot:
             relative=True,
         )
         
-        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
         if button_delay > 0:
             time.sleep(button_delay)
 
@@ -1008,8 +979,14 @@ class EatventureBot:
         return result
 
     def _detect_new_level_red_icon(self, screenshot=None, max_y=None, force=False):
-        target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
+        
+        # Check cooldown after a recent failure to prevent click loops on non-level red icons (e.g. Map rewards)
+        fail_cooldown = 15.0
+        if now - self._last_new_level_fail_time < fail_cooldown:
+            return (False, 0.0, 0, 0)
+
+        target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         cached = self._new_level_red_icon_cache
         cache_ttl = config.NEW_LEVEL_RED_ICON_CACHE_TTL
         if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
@@ -1089,15 +1066,6 @@ class EatventureBot:
         return result
 
     def _detect_new_level_priority(self, screenshot=None, max_y=None, force=False):
-        red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
-            screenshot=screenshot,
-            max_y=max_y,
-            force=force,
-        )
-        if red_found:
-            self._mark_restaurant_completed("new level red icon", red_conf)
-            return "new level red icon", red_conf, red_x, red_y
-
         found, confidence, x, y = self._detect_new_level(
             screenshot=screenshot,
             max_y=max_y,
@@ -1106,6 +1074,15 @@ class EatventureBot:
         if found:
             self._mark_restaurant_completed("new level button", confidence)
             return "new level button", confidence, x, y
+
+        red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
+            screenshot=screenshot,
+            max_y=max_y,
+            force=force,
+        )
+        if red_found:
+            self._mark_restaurant_completed("new level red icon", red_conf)
+            return "new level red icon", red_conf, red_x, red_y
 
         return None
 
@@ -1117,6 +1094,13 @@ class EatventureBot:
         )
         if priority_hit:
             source, confidence, x, y = priority_hit
+            
+            # During critical station interaction phases, only interrupt if we see the actual 
+            # renovation button, never just the red icon on the map which could be a reward.
+            critical_states = (State.WAIT_FOR_UNLOCK, State.CHECK_UNLOCK, State.SEARCH_UPGRADE_STATION, State.HOLD_UPGRADE_STATION)
+            if self.state_machine.get_state() in critical_states and source == "new level red icon":
+                return False
+
             if source == "new level red icon":
                 logger.info(
                     "Priority override: new level red icon detected at (%s, %s), interrupting current action",
@@ -1907,9 +1891,15 @@ class EatventureBot:
             force=True,
         )
         if red_found:
-            self._mark_restaurant_completed("new level red icon", red_conf)
-            logger.info(f"New level detected! Red icon at ({red_x}, {red_y})")
-            return State.CHECK_NEW_LEVEL
+            # Verify with a template match to be sure it's not just a reward
+            found_btn, _, _, _ = self._detect_new_level(screenshot=screenshot, max_y=config.MAX_SEARCH_Y)
+            
+            if self.red_icons and not found_btn:
+                logger.info("Potential new level (red icon) detected on map, but prioritizing station upgrades first")
+            else:
+                self._mark_restaurant_completed("new level red icon", red_conf)
+                logger.info(f"New level detected! Red icon at ({red_x}, {red_y})")
+                return State.CHECK_NEW_LEVEL
         
         if not self.red_icons:
             clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
@@ -2414,10 +2404,17 @@ class EatventureBot:
         ):
             return State.TRANSITION_LEVEL
         
+        logger.info(f"Clicking new level button position at {config.NEW_LEVEL_BUTTON_POS}")
+        self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
+
+        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+        if button_delay > 0:
+            if self._sleep_with_interrupt(button_delay):
+                return State.TRANSITION_LEVEL
+
         logger.info(f"Clicking new level position at {config.NEW_LEVEL_POS}")
         self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
         
-        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
         if button_delay > 0:
             if self._sleep_with_interrupt(button_delay):
                 return State.TRANSITION_LEVEL
@@ -2432,7 +2429,7 @@ class EatventureBot:
 
         self.scroll_direction = 'down'
         self.scroll_count = 0
-        return State.FIND_RED_ICONS
+        return State.TRANSITION_LEVEL
     
     def handle_transition_level(self, current_state):
         self._click_idle()
@@ -2453,12 +2450,18 @@ class EatventureBot:
             )
             if found:
                 self._mark_restaurant_completed("new level button", confidence)
-                logger.info(f"New level button found at ({x}, {y}); clicking config.NEW_LEVEL_POS at {config.NEW_LEVEL_POS}")
+                logger.info(f"New level button found at ({x}, {y}); clicking config.NEW_LEVEL_BUTTON_POS at {config.NEW_LEVEL_BUTTON_POS}")
                 
                 # Use fixed config positions as requested
+                self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
+
+                button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+                if button_delay > 0:
+                    time.sleep(button_delay)
+
+                logger.info(f"Clicking new level position at {config.NEW_LEVEL_POS}")
                 self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
                 
-                button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
                 if button_delay > 0:
                     time.sleep(button_delay)
 
@@ -2477,6 +2480,7 @@ class EatventureBot:
                         return State.TRANSITION_LEVEL
         
         logger.warning("New level button not found after 5 attempts")
+        self._last_new_level_fail_time = time.monotonic()
         self.scroll_direction = 'down'
         self.scroll_count = 0
         return State.FIND_RED_ICONS
@@ -2546,9 +2550,13 @@ class EatventureBot:
                 return State.TRANSITION_LEVEL
         return State.WAIT_FOR_UNLOCK
     
-    def run(self):
+    def start(self):
+        if self.running:
+            return
+        
         self.running = True
-        logger.info("Bot started - Press Ctrl+C to stop")
+        logger.info("Bot started")
+        
         if self.current_level_start_time is None:
             self.current_level_start_time = datetime.now()
             logger.info("Starting level timer at bot start")
@@ -2564,6 +2572,34 @@ class EatventureBot:
 
         self.historical_learner.start()
         
+        if config.ShowForbiddenArea and not self.overlay:
+            from window_capture import ForbiddenAreaOverlay
+            self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
+            self.overlay.start()
+            logger.info("Forbidden area overlay enabled and started")
+
+    def stop(self):
+        if not self.running:
+            return
+            
+        self.running = False
+        self._new_level_monitor_stop.set()
+        if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
+            self._new_level_monitor_thread.join(timeout=1.0)
+        self.historical_learner.stop()
+        if self.overlay:
+            self.overlay.stop()
+            self.overlay = None
+        logger.info("Bot stopped")
+
+    def step(self):
+        self._clear_capture_cache()
+        self._apply_tuning()
+        self._enforce_state_min_interval()
+        self.state_machine.update()
+
+    def run(self):
+        self.start()
         try:
             while self.running:
                 if not self.window_capture.is_window_active():
@@ -2578,19 +2614,3 @@ class EatventureBot:
             logger.error(f"Bot error: {e}", exc_info=True)
         finally:
             self.stop()
-
-    def step(self):
-        self._clear_capture_cache()
-        self._apply_tuning()
-        self._enforce_state_min_interval()
-        self.state_machine.update()
-    
-    def stop(self):
-        self.running = False
-        self._new_level_monitor_stop.set()
-        if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
-            self._new_level_monitor_thread.join(timeout=1.0)
-        self.historical_learner.stop()
-        if self.overlay:
-            self.overlay.stop()
-        logger.info("Bot stopped")
