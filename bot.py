@@ -668,11 +668,12 @@ class EatventureBot:
                 time.sleep(max(interval, 0.01))
                 continue
 
-            limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+            monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
+            limited_screenshot = monitor_screenshot[:config.MAX_SEARCH_Y, :]
 
             red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
-                screenshot=limited_screenshot,
-                max_y=config.MAX_SEARCH_Y,
+                screenshot=monitor_screenshot,
+                max_y=config.EXTENDED_SEARCH_Y,
                 force=True,
             )
             if red_found:
@@ -794,8 +795,8 @@ class EatventureBot:
 
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
-            screenshot=limited_screenshot,
-            max_y=config.MAX_SEARCH_Y,
+            screenshot=priority_screenshot,
+            max_y=config.EXTENDED_SEARCH_Y,
             force=True,
         )
         if priority_hit:
@@ -992,14 +993,32 @@ class EatventureBot:
         if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
             return cached["result"]
 
+        max_template_width = 0
+        max_template_height = 0
+        for _, template, _ in self._iter_red_icon_templates():
+            max_template_height = max(max_template_height, int(template.shape[0]))
+            max_template_width = max(max_template_width, int(template.shape[1]))
+
+        roi_pad_x = max(2, max_template_width // 2)
+        roi_pad_y = max(2, max_template_height // 2)
+
+        # The new-level red icon is configured near the bottom of the screen.
+        # If callers provide a cropped frame (e.g. MAX_SEARCH_Y), the ROI can
+        # be clipped out entirely and produce guaranteed false negatives.
+        required_bottom = config.NEW_LEVEL_RED_ICON_Y_MAX + roi_pad_y
         if screenshot is None:
             screenshot = self._capture(max_y=target_max_y, force=force)
 
+        if screenshot.shape[0] < required_bottom and max_y is None:
+            recapture_max_y = max(target_max_y, required_bottom)
+            screenshot = self._capture(max_y=recapture_max_y, force=force)
+            target_max_y = recapture_max_y
+
         height, width = screenshot.shape[:2]
-        x_min = max(0, config.NEW_LEVEL_RED_ICON_X_MIN)
-        x_max = min(width, config.NEW_LEVEL_RED_ICON_X_MAX)
-        y_min = max(0, config.NEW_LEVEL_RED_ICON_Y_MIN)
-        y_max = min(height, config.NEW_LEVEL_RED_ICON_Y_MAX)
+        x_min = max(0, config.NEW_LEVEL_RED_ICON_X_MIN - roi_pad_x)
+        x_max = min(width, config.NEW_LEVEL_RED_ICON_X_MAX + roi_pad_x)
+        y_min = max(0, config.NEW_LEVEL_RED_ICON_Y_MIN - roi_pad_y)
+        y_max = min(height, config.NEW_LEVEL_RED_ICON_Y_MAX + roi_pad_y)
 
         if x_min >= x_max or y_min >= y_max or not self.available_red_icon_templates:
             result = (False, 0.0, 0, 0)
