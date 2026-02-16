@@ -1018,6 +1018,15 @@ class EatventureBot:
         if screenshot is None:
             screenshot = self._capture(max_y=target_max_y, force=force)
 
+        # The new-level red icon is configured near the bottom of the screen.
+        # If callers provide a cropped frame (e.g. MAX_SEARCH_Y), the ROI can
+        # be clipped out entirely and produce guaranteed false negatives.
+        required_bottom = config.NEW_LEVEL_RED_ICON_Y_MAX
+        if screenshot.shape[0] < required_bottom:
+            recapture_max_y = max(target_max_y, required_bottom)
+            screenshot = self._capture(max_y=recapture_max_y, force=True)
+            target_max_y = recapture_max_y
+
         height, width = screenshot.shape[:2]
         x_min = max(0, config.NEW_LEVEL_RED_ICON_X_MIN)
         x_max = min(width, config.NEW_LEVEL_RED_ICON_X_MAX)
