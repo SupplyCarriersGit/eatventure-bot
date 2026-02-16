@@ -1018,20 +1018,29 @@ class EatventureBot:
         if screenshot is None:
             screenshot = self._capture(max_y=target_max_y, force=force)
 
+        max_template_width = 0
+        max_template_height = 0
+        for _, template, _ in self._iter_red_icon_templates():
+            max_template_height = max(max_template_height, int(template.shape[0]))
+            max_template_width = max(max_template_width, int(template.shape[1]))
+
+        roi_pad_x = max(2, max_template_width // 2)
+        roi_pad_y = max(2, max_template_height // 2)
+
         # The new-level red icon is configured near the bottom of the screen.
         # If callers provide a cropped frame (e.g. MAX_SEARCH_Y), the ROI can
         # be clipped out entirely and produce guaranteed false negatives.
-        required_bottom = config.NEW_LEVEL_RED_ICON_Y_MAX
+        required_bottom = config.NEW_LEVEL_RED_ICON_Y_MAX + roi_pad_y
         if screenshot.shape[0] < required_bottom:
             recapture_max_y = max(target_max_y, required_bottom)
             screenshot = self._capture(max_y=recapture_max_y, force=True)
             target_max_y = recapture_max_y
 
         height, width = screenshot.shape[:2]
-        x_min = max(0, config.NEW_LEVEL_RED_ICON_X_MIN)
-        x_max = min(width, config.NEW_LEVEL_RED_ICON_X_MAX)
-        y_min = max(0, config.NEW_LEVEL_RED_ICON_Y_MIN)
-        y_max = min(height, config.NEW_LEVEL_RED_ICON_Y_MAX)
+        x_min = max(0, config.NEW_LEVEL_RED_ICON_X_MIN - roi_pad_x)
+        x_max = min(width, config.NEW_LEVEL_RED_ICON_X_MAX + roi_pad_x)
+        y_min = max(0, config.NEW_LEVEL_RED_ICON_Y_MIN - roi_pad_y)
+        y_max = min(height, config.NEW_LEVEL_RED_ICON_Y_MAX + roi_pad_y)
 
         if x_min >= x_max or y_min >= y_max or not self.available_red_icon_templates:
             result = (False, 0.0, 0, 0)
