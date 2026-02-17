@@ -627,11 +627,11 @@ class EatventureBot:
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
         self.forbidden_icon_scrolls = 0
+        self.search_attempt_counter = 0
         
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
         self.consecutive_failed_cycles = 0
-        self.no_red_icons_found = False
         
         self.total_levels_completed = 0
         self.current_level_start_time = None
@@ -791,32 +791,46 @@ class EatventureBot:
             logger.info("Red icon in forbidden zone → scrolling up to clear")
             segments = self._build_scroll_segments("up", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
             seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
+            
+            if segments:
+                from_x, from_y, _, _ = segments[0]
+                self.mouse_controller.mouse_down(from_x, from_y, relative=True)
+
             for from_x, from_y, to_x, to_y in segments:
-                if not self.mouse_controller.drag(
-                    from_x,
-                    from_y,
-                    to_x,
-                    to_y,
-                    duration=seg_duration,
-                    relative=True,
-                    interrupt_check=lambda: self._new_level_event.is_set(),
-                ):
-                    return False
+                steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
+                step_duration = seg_duration / steps
+                for step in range(1, steps + 1):
+                    t = step / steps
+                    curr_x = int(from_x + (to_x - from_x) * t)
+                    curr_y = int(from_y + (to_y - from_y) * t)
+                    self.mouse_controller.move_to(curr_x, curr_y, relative=True)
+                    time.sleep(step_duration)
+
+            if segments:
+                _, _, last_to_x, last_to_y = segments[-1]
+                self.mouse_controller.mouse_up(last_to_x, last_to_y, relative=True)
         else:
             logger.info("Red icon in forbidden zone → scrolling down to clear")
             segments = self._build_scroll_segments("down", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
             seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
+            
+            if segments:
+                from_x, from_y, _, _ = segments[0]
+                self.mouse_controller.mouse_down(from_x, from_y, relative=True)
+
             for from_x, from_y, to_x, to_y in segments:
-                if not self.mouse_controller.drag(
-                    from_x,
-                    from_y,
-                    to_x,
-                    to_y,
-                    duration=seg_duration,
-                    relative=True,
-                    interrupt_check=lambda: self._new_level_event.is_set(),
-                ):
-                    return False
+                steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
+                step_duration = seg_duration / steps
+                for step in range(1, steps + 1):
+                    t = step / steps
+                    curr_x = int(from_x + (to_x - from_x) * t)
+                    curr_y = int(from_y + (to_y - from_y) * t)
+                    self.mouse_controller.move_to(curr_x, curr_y, relative=True)
+                    time.sleep(step_duration)
+
+            if segments:
+                _, _, last_to_x, last_to_y = segments[-1]
+                self.mouse_controller.mouse_up(last_to_x, last_to_y, relative=True)
 
         self._click_idle()
         if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
@@ -832,7 +846,6 @@ class EatventureBot:
         if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
             logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
             self._no_red_scroll_cycle_pending = False
-            self.no_red_icons_found = True
             return State.SCROLL
 
         interrupt = self._consume_new_level_interrupt()
@@ -1641,20 +1654,36 @@ class EatventureBot:
         segment_duration = max(0.001, scroll_duration / max(1, len(segments)))
         segment_settle_delay = max(0.0, float(getattr(config, "SCROLL_SEGMENT_SETTLE_DELAY", 0.0)))
 
-        for from_x, from_y, to_x, to_y in segments:
+        # Start with a mouse down at the beginning of the scroll
+        if segments:
+            from_x, from_y, _, _ = segments[0]
+            if not self.mouse_controller.mouse_down(from_x, from_y, relative=True):
+                _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "Failed to start steady drag")
+                return state_holder["state"]
+
+        for i, (from_x, from_y, to_x, to_y) in enumerate(segments):
             if stop_event.is_set():
                 break
-            if not self.mouse_controller.drag(
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-                duration=segment_duration,
-                relative=True,
-                interrupt_check=lambda: stop_event.is_set() or self._new_level_event.is_set(),
-            ):
-                _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level interrupt during drag")
-                break
+            
+            # Use drag but with a flag or logic that doesn't release the button 
+            # OR manually move the cursor to simulate a steady drag.
+            # Since MouseController.drag already handles mouse down/up internally, 
+            # we'll modify the loop to use move_to for a truly steady drag.
+            
+            steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
+            step_duration = segment_duration / steps
+            
+            for step in range(1, steps + 1):
+                if stop_event.is_set() or self._new_level_event.is_set():
+                    break
+                
+                t = step / steps
+                curr_x = int(from_x + (to_x - from_x) * t)
+                curr_y = int(from_y + (to_y - from_y) * t)
+                
+                self.mouse_controller.move_to(curr_x, curr_y, relative=True)
+                time.sleep(step_duration)
+
             if segment_settle_delay > 0:
                 if self._sleep_with_interrupt(segment_settle_delay):
                     _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "New level interrupt during settle")
@@ -1662,6 +1691,7 @@ class EatventureBot:
             
             # Synchronous Red Icon Scan (Step-Scan)
             if scan_for_red_icons:
+                # Capture while mouse is DOWN for faster feedback during steady drag
                 screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
                 scroll_threshold = max(
                     0.0,
@@ -1685,11 +1715,16 @@ class EatventureBot:
                         self.red_icons = self._prioritize_red_icons(filtered_icons)
                         self.current_red_icon_index = 0
                         self.red_icon_cycle_count = 0
-                        self.no_red_icons_found = False
                         self.work_done = True
                         logger.info(f"✓ {len(self.red_icons)} red icons detected during active scroll segment")
                         _interrupt_to_main_cycle(State.CLICK_RED_ICON, "Red icon detected (Step-Scan)")
                         break
+
+        # Always release the mouse button at the end of the scroll sequence
+        if segments:
+            _, _, final_to_x, final_to_y = segments[-1]
+            # Use the last position reached if interrupted
+            self.mouse_controller.mouse_up(final_to_x, final_to_y, relative=True)
 
         stop_event.set()
         monitor_thread.join(timeout=0.2)
@@ -1735,12 +1770,49 @@ class EatventureBot:
         self.red_icons = self._prioritize_red_icons(filtered_icons)
         self.current_red_icon_index = 0
         self.red_icon_cycle_count = 0
-        self.no_red_icons_found = False
         self.work_done = True
         logger.info(f"✓ {len(self.red_icons)} red icons found during scroll; stopping scan")
         return State.CLICK_RED_ICON
 
     
+    def execute_search_pattern(self):
+        """
+        Implements Incremental Oscillating Search logic:
+        Cycle 1: Up 1 -> Check -> Down 1 (Start) -> Check
+        Cycle 2: Up 2 -> Check -> Down 2 (Start) -> Check
+        ...
+        Cycle N: Up N -> Check -> Down N (Start) -> Check
+        """
+        self.search_attempt_counter += 1
+        if self.search_attempt_counter > config.MAX_SEARCH_ATTEMPTS:
+            logger.info("MAX_SEARCH_ATTEMPTS reached. Resetting search cycle.")
+            self.search_attempt_counter = 1
+
+        multiplier = config.SCROLL_STEP_MULTIPLIER
+        current_distance = self.search_attempt_counter * multiplier
+        
+        logger.info(f"--- Search Cycle {self.search_attempt_counter} (Distance: {current_distance}) ---")
+
+        # 1. Scroll Up N units
+        logger.info(f"Incremental Search: Scrolling UP {current_distance} units")
+        # We use a custom distance ratio for this incremental step
+        # Assuming SCROLL_DISTANCE_RATIO 1.0 is the base 'unit'
+        step_ratio = current_distance * getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
+        
+        interrupt_state = self._scroll_and_scan_for_red_icons("up", config.SCROLL_DURATION)
+        if interrupt_state == State.CLICK_RED_ICON:
+            logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
+            return State.CLICK_RED_ICON
+
+        # 2. Scroll Down N units (Return to Start)
+        logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
+        interrupt_state = self._scroll_and_scan_for_red_icons("down", config.SCROLL_DURATION)
+        if interrupt_state == State.CLICK_RED_ICON:
+            logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
+            return State.CLICK_RED_ICON
+
+        return State.FIND_RED_ICONS
+
     def load_templates(self):
         required_templates = self._required_template_names()
         scanner = AssetScanner(self.image_matcher)
@@ -1930,6 +2002,7 @@ class EatventureBot:
         self._red_template_priority = []
         self._red_template_last_seen = {}
         self._recent_red_icon_history = []
+        self.search_attempt_counter = 0
         
         # Apply the defaults back to mouse controller
         self._apply_tuning()
@@ -2000,14 +2073,12 @@ class EatventureBot:
             clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
             if clicked_targets > 0:
                 logger.info(
-                    "No red icons detected; fallback clicked %s non-red assets. Proceeding to no-icon scrolling cycle.",
+                    "No red icons detected; fallback clicked %s non-red assets. Proceeding to scrolling cycle.",
                     clicked_targets,
                 )
-                self.no_red_icons_found = True
                 return State.SCROLL
 
             logger.info("No valid red icons after scan; no fallback assets found, scrolling to search")
-            self.no_red_icons_found = True
             return State.SCROLL
         else:
             filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(self.red_icons)
@@ -2018,14 +2089,12 @@ class EatventureBot:
                 clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
                 if clicked_targets > 0:
                     logger.info(
-                        "Filtered red icons to zero; fallback clicked %s non-red assets. Proceeding to no-icon scrolling cycle.",
+                        "Filtered red icons to zero; fallback clicked %s non-red assets. Proceeding to scrolling cycle.",
                         clicked_targets,
                     )
-                    self.no_red_icons_found = True
                     return State.SCROLL
 
                 logger.info("No valid red icons after filtering; no fallback assets found, scrolling to search")
-                self.no_red_icons_found = True
                 return State.SCROLL
             
             self.red_icons = self._prioritize_red_icons(filtered_icons)
@@ -2034,7 +2103,6 @@ class EatventureBot:
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
             self.work_done = True
-            self.no_red_icons_found = False
             return State.CLICK_RED_ICON
     
     def handle_click_red_icon(self, current_state):
@@ -2440,51 +2508,10 @@ class EatventureBot:
             logger.info("New level detected before scroll, transitioning")
             return State.TRANSITION_LEVEL
         
-        scroll_duration = config.NO_ICON_SCROLL_DURATION if self.no_red_icons_found else config.SCROLL_DURATION
-
-        if self.no_red_icons_found:
-            logger.info("No red icons found → running up/down scan scroll sequence")
-            for direction, count in (
-                ("up", config.NO_ICON_SCROLL_UP_COUNT),
-                ("down", config.NO_ICON_SCROLL_DOWN_COUNT),
-            ):
-                for _ in range(count):
-                    state = self._scroll_and_scan_for_red_icons(direction, scroll_duration)
-                    if state is not None:
-                        return state
-            return State.FIND_RED_ICONS
-
-        direction = 'up' if self.scroll_direction == 'up' else 'down'
-        
-        if self.no_red_icons_found:
-            max_count = config.NO_ICON_SCROLL_UP_COUNT if direction == 'up' else config.NO_ICON_SCROLL_DOWN_COUNT
-            logger.info(f"No red icons found → searching {direction.upper()} ({self.scroll_count + 1}/{max_count})")
-        else:
-            max_count = getattr(config, "SCROLL_UP_CYCLES" if direction == 'up' else "MAX_SCROLL_CYCLES", self.max_scroll_count)
-            logger.info(
-                f"{'⬆' if direction == 'up' else '⬇'} Scroll {direction.upper()} ({self.scroll_count + 1}/{max_count}, segmented)"
-            )
-
-        interrupt_state = self._scroll_with_background_asset_detection(
-            direction,
-            scroll_duration,
-            scan_for_red_icons=True,
-        )
-        if interrupt_state is not None:
-            return interrupt_state
-
-        self._click_idle()
-        
-        self.scroll_count += 1
-        
-        if self.scroll_count >= max_count:
-            if self.scroll_direction == 'up':
-                self.scroll_direction = 'down'
-            else:
-                self.scroll_direction = 'up'
-            self.scroll_count = 0
-        
-        return State.FIND_RED_ICONS
+        # We now rely entirely on the Incremental Oscillating Search pattern
+        # when the bot enters the SCROLL state (which happens when no icons are found).
+        logger.info("Executing Incremental Oscillating Search")
+        return self.execute_search_pattern()
     
     def handle_check_new_level(self, current_state):
         self._click_idle()
