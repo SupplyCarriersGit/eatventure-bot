@@ -1671,7 +1671,8 @@ class EatventureBot:
             # we'll modify the loop to use move_to for a truly steady drag.
             
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-            step_duration = segment_duration / steps
+            min_step_interval = max(0.001, float(getattr(config, "SCROLL_MIN_INTERVAL", 0.005)))
+            step_duration = max(min_step_interval, segment_duration / steps)
             
             for step in range(1, steps + 1):
                 if stop_event.is_set() or self._new_level_event.is_set():
@@ -1784,9 +1785,10 @@ class EatventureBot:
         ...
         Cycle N: Up N -> Check -> Down N (Start) -> Check
         """
+        max_search_cycles = self._get_max_search_cycles()
         self.search_attempt_counter += 1
-        if self.search_attempt_counter > config.MAX_SEARCH_ATTEMPTS:
-            logger.info("MAX_SEARCH_ATTEMPTS reached. Resetting search cycle.")
+        if self.search_attempt_counter > max_search_cycles:
+            logger.info("MAX search cycles (%s) reached. Resetting search cycle.", max_search_cycles)
             self.search_attempt_counter = 1
 
         multiplier = config.SCROLL_STEP_MULTIPLIER
@@ -1815,6 +1817,10 @@ class EatventureBot:
                 )
             return interrupt_state
 
+        settle_delay = max(0.0, float(getattr(config, "SCROLL_SETTLE_DELAY", 0.0)))
+        if settle_delay > 0 and self._sleep_with_interrupt(settle_delay):
+            return State.TRANSITION_LEVEL
+
         # 2. Scroll Down N units (Return to Start)
         logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
         interrupt_state = self._scroll_and_scan_for_red_icons(
@@ -1832,7 +1838,25 @@ class EatventureBot:
                 )
             return interrupt_state
 
+        if settle_delay > 0 and self._sleep_with_interrupt(settle_delay):
+            return State.TRANSITION_LEVEL
+
         return State.FIND_RED_ICONS
+
+    def _get_max_search_cycles(self):
+        """
+        Resolve maximum incremental search cycles with backward-compatible config support.
+        """
+        max_cycles = getattr(config, "MAX_SEARCH_ATTEMPTS", None)
+        legacy_max_cycles = getattr(config, "MAX_SEARCH_CYCLES", None)
+
+        if max_cycles is None and legacy_max_cycles is None:
+            return 15
+
+        if max_cycles is None:
+            return max(1, int(legacy_max_cycles))
+
+        return max(1, int(max_cycles))
 
     def load_templates(self):
         required_templates = self._required_template_names()
