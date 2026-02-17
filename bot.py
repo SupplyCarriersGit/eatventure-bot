@@ -626,7 +626,7 @@ class EatventureBot:
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
         self.forbidden_icon_scrolls = 0
-        self.search_attempt_counter = 0
+        self.scroll_cycle_counter = 1
         
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
@@ -1485,17 +1485,19 @@ class EatventureBot:
     def _build_scroll_segments(self, direction, distance_ratio=None):
         segments = max(1, int(getattr(config, "SCROLL_SEGMENTS", 1)))
         scroll_ratio = float(getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)) if distance_ratio is None else float(distance_ratio)
-        scroll_ratio = max(0.1, min(1.0, scroll_ratio))
+        scroll_ratio = max(0.01, min(1.0, scroll_ratio))
+
+        start_x, start_y = config.SCROLL_START_POS
+        dist_y = int(config.SCROLL_Y_DISTANCE * scroll_ratio)
 
         if direction == "up":
-            full_start_x, full_start_y = config.SCROLL_UP_START_POS
-            full_end_x, full_end_y = config.SCROLL_UP_END_POS
+            full_start_x, full_start_y = start_x, start_y
+            full_end_x, full_end_y = start_x, start_y - dist_y
         else:
-            full_start_x, full_start_y = config.SCROLL_DOWN_START_POS
-            full_end_x, full_end_y = config.SCROLL_DOWN_END_POS
+            full_start_x, full_start_y = start_x, start_y
+            full_end_x, full_end_y = start_x, start_y + dist_y
 
-        end_x = int(full_start_x + (full_end_x - full_start_x) * scroll_ratio)
-        end_y = int(full_start_y + (full_end_y - full_start_y) * scroll_ratio)
+        end_x, end_y = full_end_x, full_end_y
 
         min_segment_distance = max(1, int(getattr(config, "SCROLL_MIN_SEGMENT_DISTANCE", 1)))
 
@@ -1531,9 +1533,19 @@ class EatventureBot:
         state_holder = {"state": None}
 
         def _interrupt_to_main_cycle(new_state, reason):
-            logger.info("%s during scroll; interrupting scroll", reason)
-            state_holder["state"] = new_state
-            stop_event.set()
+            logger.info("%s during scroll; tracking for return but continuing scroll segments", reason)
+            # Prioritize states: TRANSITION > ASSET_CHECK > CLICK_RED_ICON
+            priority = {
+                State.TRANSITION_LEVEL: 10,
+                State.CHECK_UNLOCK: 5,
+                State.SEARCH_UPGRADE_STATION: 5,
+                State.OPEN_BOXES: 5,
+                State.CLICK_RED_ICON: 1,
+            }
+            current_priority = priority.get(state_holder["state"], 0)
+            new_priority = priority.get(new_state, 0)
+            if new_priority > current_priority:
+                state_holder["state"] = new_state
 
         def _detect_interrupt_assets(screenshot):
             threshold = max(0.0, min(1.0, float(getattr(config, "SCROLL_INTERRUPT_ASSET_THRESHOLD", 0.93))))
@@ -1726,25 +1738,17 @@ class EatventureBot:
     
     def execute_oscillating_search(self):
         """
-        Implements Incremental Oscillating Search logic:
-        Cycle 1: Up 1 -> Check -> Down 1 (Start) -> Check
-        Cycle 2: Up 2 -> Check -> Down 2 (Start) -> Check
-        ...
-        Cycle N: Up N -> Check -> Down N (Start) -> Check
+        Implements Continuous Incremental Oscillating Search using a Persistent State Counter.
+        This function performs ONE Up/Down cycle per call and returns.
         """
-        max_search_cycles = self._get_max_search_cycles()
-        current_cycle = max(1, int(self.search_attempt_counter or 1))
-
-        multiplier = config.SCROLL_STEP_MULTIPLIER
+        # 1. CALCULATE DISTANCE based on persistent counter
         unit_ratio = getattr(config, "SCROLL_UNIT_RATIO", 0.05)
-        # widening distance ratio is the distance to scroll away from center
-        widening_ratio = current_cycle * multiplier * unit_ratio
+        widening_ratio = self.scroll_cycle_counter * config.SCROLL_STEP_MULTIPLIER * unit_ratio
         
         # Clamp widening ratio between 0.01 and 1.0 for safety
         widening_ratio = max(0.01, min(1.0, widening_ratio))
 
-        logger.info(f"DEBUG: Starting Cycle {current_cycle} - Distance: {widening_ratio:.2f}")
-        logger.info(f"--- Continuous Search Cycle {current_cycle} (Widening Ratio: {widening_ratio:.2f}) ---")
+        logger.info(f"DEBUG: Starting Cycle {self.scroll_cycle_counter} (Distance Ratio: {widening_ratio:.2f})")
 
         def _interrupt_priority(state):
             if state is None:
@@ -1766,80 +1770,46 @@ class EatventureBot:
                 return new_state
             return current_pending
 
-        # 1. Scroll Up by N units (Widen Up)
+        # 2. PERFORM THE SEARCH (The "Peek" UP)
         logger.info(f"Incremental Search: Scrolling UP by {widening_ratio:.2f} ratio")
-        interrupt_state = self._scroll_and_scan_for_red_icons(
+        interrupt_state_up = self._scroll_and_scan_for_red_icons(
             "up",
             config.SCROLL_DURATION,
             distance_ratio=widening_ratio,
         )
-        if interrupt_state is not None:
-            if interrupt_state == State.CLICK_RED_ICON:
-                logger.info("Red Icon found during Incremental UP scroll! Completing DOWN return before state switch.")
-            else:
-                logger.info(
-                    "Interrupt asset/state (%s) found during Incremental UP scroll; completing DOWN return before state switch.",
-                    interrupt_state.name,
-                )
+        
+        # Render Wait (using settle delay)
+        time.sleep(max(0.05, getattr(config, "SCROLL_SETTLE_DELAY", 0.15)))
 
-        turnaround_wait = max(
-            0.05,
-            float(
-                getattr(
-                    config,
-                    "OSCILLATION_TURNAROUND_WAIT",
-                    getattr(config, "SCROLL_SETTLE_DELAY", 0.15),
-                )
-            ),
-        )
-        pending_state = _merge_interrupt_state(None, interrupt_state)
-
-        turnaround_interrupted = self._sleep_with_interrupt(turnaround_wait)
-        if turnaround_interrupted:
-            pending_state = _merge_interrupt_state(pending_state, State.TRANSITION_LEVEL)
-
-        # 2. Scroll Down N units (Return to Start)
-        logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Start)")
-        interrupt_state = self._scroll_and_scan_for_red_icons(
+        # 3. RETURN TO CENTER (Crucial Step - DOWN)
+        logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Center)")
+        interrupt_state_down = self._scroll_and_scan_for_red_icons(
             "down",
             config.SCROLL_DURATION,
             distance_ratio=widening_ratio,
         )
-        if interrupt_state is not None:
-            if interrupt_state == State.CLICK_RED_ICON:
-                logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
-            else:
-                logger.info(
-                    "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
-                    interrupt_state.name,
-                )
-            pending_state = _merge_interrupt_state(pending_state, interrupt_state)
+        
+        # Render Wait (using settle delay)
+        time.sleep(max(0.05, getattr(config, "SCROLL_SETTLE_DELAY", 0.15)))
 
-        turnaround_interrupted = self._sleep_with_interrupt(turnaround_wait)
-        if turnaround_interrupted:
-            pending_state = _merge_interrupt_state(pending_state, State.TRANSITION_LEVEL)
+        # 4. INCREMENT THE COUNTER (Persist for NEXT time)
+        # Store detection results before incrementing
+        pending_state = _merge_interrupt_state(None, interrupt_state_up)
+        pending_state = _merge_interrupt_state(pending_state, interrupt_state_down)
 
-        self.search_attempt_counter = current_cycle + 1
-        if self.search_attempt_counter > max_search_cycles:
-            logger.info("MAX search cycles (%s) reached. Resetting search cycle.", max_search_cycles)
-            self.search_attempt_counter = 1
+        self.scroll_cycle_counter += 1
+        
+        # 5. CHECK RESET CONDITION
+        # Using MAX_SCROLL_CYCLES from config
+        if self.scroll_cycle_counter > config.MAX_SCROLL_CYCLES:
+            logger.info(f"Max cycles ({config.MAX_SCROLL_CYCLES}) reached. Resetting to 1.")
+            self.scroll_cycle_counter = 1
 
-        return pending_state or State.FIND_RED_ICONS
+        if pending_state:
+            logger.info(f"Interrupt state ({pending_state.name}) found during cycle. Action triggered.")
+            return pending_state
 
-    def _get_max_search_cycles(self):
-        """
-        Resolve maximum incremental search cycles with backward-compatible config support.
-        """
-        max_cycles = getattr(config, "MAX_SEARCH_ATTEMPTS", None)
-        legacy_max_cycles = getattr(config, "MAX_SEARCH_CYCLES", None)
-
-        if max_cycles is None and legacy_max_cycles is None:
-            return 15
-
-        if max_cycles is None:
-            return max(1, int(legacy_max_cycles))
-
-        return max(1, int(max_cycles))
+        return State.FIND_RED_ICONS
 
     def load_templates(self):
         required_templates = self._required_template_names()
@@ -2030,7 +2000,7 @@ class EatventureBot:
         self._red_template_priority = []
         self._red_template_last_seen = {}
         self._recent_red_icon_history = []
-        self.search_attempt_counter = 0
+        self.scroll_cycle_counter = 1
         
         # Apply the defaults back to mouse controller
         self._apply_tuning()
@@ -2643,6 +2613,7 @@ class EatventureBot:
         self.current_level_start_time = datetime.now()
         self.completion_detected_time = None
         self.completion_detected_by = None
+        self.scroll_cycle_counter = 1
 
         self.telegram.notify_new_level(self.total_levels_completed, time_spent)
         self.historical_learner.record_completion(
