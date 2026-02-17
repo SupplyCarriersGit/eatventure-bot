@@ -1671,7 +1671,8 @@ class EatventureBot:
             # we'll modify the loop to use move_to for a truly steady drag.
             
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-            step_duration = segment_duration / steps
+            min_step_interval = max(0.001, float(getattr(config, "SCROLL_MIN_INTERVAL", 0.005)))
+            step_duration = max(min_step_interval, segment_duration / steps)
             
             for step in range(1, steps + 1):
                 if stop_event.is_set() or self._new_level_event.is_set():
@@ -1778,15 +1779,16 @@ class EatventureBot:
     
     def execute_search_pattern(self):
         """
-        Implements Continuous Incremental Oscillating Search logic:
-        Cycle 1: Up N -> Check for Red Icon -> Down N (Return to Center) -> Check for Red Icon.
-        Cycle 2: Up N+1 -> Check for Red Icon -> Down N+1 (Return to Center) -> Check for Red Icon.
-        The widening distance is Cycle * SCROLL_STEP_MULTIPLIER * SCROLL_UNIT_RATIO.
-        The counter ONLY resets when it reaches MAX_SEARCH_CYCLES.
+        Implements Incremental Oscillating Search logic:
+        Cycle 1: Up 1 -> Check -> Down 1 (Start) -> Check
+        Cycle 2: Up 2 -> Check -> Down 2 (Start) -> Check
+        ...
+        Cycle N: Up N -> Check -> Down N (Start) -> Check
         """
+        max_search_cycles = self._get_max_search_cycles()
         self.search_attempt_counter += 1
-        if self.search_attempt_counter > config.MAX_SEARCH_CYCLES:
-            logger.info("MAX_SEARCH_CYCLES reached. Resetting incremental search cycle to 1.")
+        if self.search_attempt_counter > max_search_cycles:
+            logger.info("MAX search cycles (%s) reached. Resetting search cycle.", max_search_cycles)
             self.search_attempt_counter = 1
 
         multiplier = config.SCROLL_STEP_MULTIPLIER
@@ -1806,40 +1808,56 @@ class EatventureBot:
             config.SCROLL_DURATION,
             distance_ratio=widening_ratio,
         )
-        
-        # 2. Scroll Down by N units (Return to Center)
-        logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Center)")
-        # We MUST return to start exactly to keep the widening logic stable
-        interrupt_state_down = self._scroll_and_scan_for_red_icons(
+        if interrupt_state is not None:
+            if interrupt_state == State.CLICK_RED_ICON:
+                logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
+            else:
+                logger.info(
+                    "Interrupt asset/state (%s) found during Incremental UP scroll; switching state without resetting search cycle.",
+                    interrupt_state.name,
+                )
+            return interrupt_state
+
+        settle_delay = max(0.0, float(getattr(config, "SCROLL_SETTLE_DELAY", 0.0)))
+        if settle_delay > 0 and self._sleep_with_interrupt(settle_delay):
+            return State.TRANSITION_LEVEL
+
+        # 2. Scroll Down N units (Return to Start)
+        logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
+        interrupt_state = self._scroll_and_scan_for_red_icons(
             "down",
             config.SCROLL_DURATION,
             distance_ratio=widening_ratio,
         )
+        if interrupt_state is not None:
+            if interrupt_state == State.CLICK_RED_ICON:
+                logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
+            else:
+                logger.info(
+                    "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
+                    interrupt_state.name,
+                )
+            return interrupt_state
 
-        # 3. Action Trigger: Priority selection of states found during oscillation
-        priority = {
-            State.TRANSITION_LEVEL: 10,
-            State.CHECK_UNLOCK: 5,
-            State.SEARCH_UPGRADE_STATION: 5,
-            State.OPEN_BOXES: 5,
-            State.CLICK_RED_ICON: 1,
-        }
-        
-        final_state = None
-        for s in (interrupt_state_up, interrupt_state_down):
-            if s is not None:
-                if final_state is None or priority.get(s, 0) > priority.get(final_state, 0):
-                    final_state = s
-
-        if final_state:
-            logger.info(
-                "Interrupt state (%s) found during oscillation; triggering action. Search will proceed to Cycle %s next time.",
-                final_state.name,
-                self.search_attempt_counter + 1,
-            )
-            return final_state
+        if settle_delay > 0 and self._sleep_with_interrupt(settle_delay):
+            return State.TRANSITION_LEVEL
 
         return State.FIND_RED_ICONS
+
+    def _get_max_search_cycles(self):
+        """
+        Resolve maximum incremental search cycles with backward-compatible config support.
+        """
+        max_cycles = getattr(config, "MAX_SEARCH_ATTEMPTS", None)
+        legacy_max_cycles = getattr(config, "MAX_SEARCH_CYCLES", None)
+
+        if max_cycles is None and legacy_max_cycles is None:
+            return 15
+
+        if max_cycles is None:
+            return max(1, int(legacy_max_cycles))
+
+        return max(1, int(max_cycles))
 
     def load_templates(self):
         required_templates = self._required_template_names()
