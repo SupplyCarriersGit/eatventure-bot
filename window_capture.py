@@ -4,7 +4,6 @@ import win32con
 import win32api
 import ctypes
 import numpy as np
-from PIL import Image
 import logging
 import threading
 
@@ -78,9 +77,10 @@ class WindowCapture:
         saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
         saveDC.SelectObject(saveBitMap)
         
-        result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
-        
-        bmpinfo = saveBitMap.GetInfo()
+        print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
+        if print_result != 1:
+            logger.debug("PrintWindow returned %s for hwnd %s", print_result, self.hwnd)
+
         bmpstr = saveBitMap.GetBitmapBits(True)
         img = np.frombuffer(bmpstr, dtype=np.uint8)
         img.shape = (height, width, 4)
@@ -119,8 +119,8 @@ class ForbiddenAreaOverlay:
         if self.overlay_hwnd:
             try:
                 win32gui.DestroyWindow(self.overlay_hwnd)
-            except:
-                pass
+            except Exception as exc:
+                logger.debug("Overlay destroy failed: %s", exc)
             self.overlay_hwnd = None
         logger.info("Forbidden area overlay stopped")
     
@@ -133,8 +133,9 @@ class ForbiddenAreaOverlay:
             wc.hbrBackground = win32gui.GetStockObject(win32con.NULL_BRUSH)
             
             try:
-                class_atom = win32gui.RegisterClass(wc)
-            except Exception as e:
+                win32gui.RegisterClass(wc)
+            except Exception:
+                # Class already exists in most runs.
                 pass
             
             target_rect = win32gui.GetClientRect(self.target_hwnd)

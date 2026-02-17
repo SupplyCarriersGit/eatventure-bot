@@ -2,11 +2,10 @@ import json
 import os
 import time
 import logging
-import re
 import threading
 from datetime import datetime
 
-from window_capture import WindowCapture, ForbiddenAreaOverlay
+from window_capture import WindowCapture
 from image_matcher import ImageMatcher
 from mouse_controller import MouseController
 from state_machine import StateMachine, State
@@ -828,7 +827,7 @@ class EatventureBot:
             self._click_new_level_override(source=interrupt["source"])
             return State.TRANSITION_LEVEL
 
-        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        priority_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
             screenshot=priority_screenshot,
             max_y=config.EXTENDED_SEARCH_Y,
@@ -2074,9 +2073,9 @@ class EatventureBot:
             
             if found:
                 if self.mouse_controller.is_in_forbidden_zone(x, y):
-                    logger.warning(f"Unlock button in forbidden zone, skipping")
+                    logger.warning("Unlock button in forbidden zone, skipping")
                 else:
-                    logger.info(f"Unlock found, clicking")
+                    logger.info("Unlock found, clicking")
                     clicked_unlock = self.mouse_controller.click(x, y, relative=True)
 
         if clicked_unlock:

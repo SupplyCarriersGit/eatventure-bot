@@ -29,7 +29,7 @@ def on_press(key):
                     rel_y = screen_y - win_y
                     logger.info(f"[X pressed] Window position: ({rel_x}, {rel_y})")
                 else:
-                    logger.info(f"[X pressed] Bot not initialized yet")
+                    logger.info("[X pressed] Bot not initialized yet")
             elif key.char == 'z':
                 logger = logging.getLogger(__name__)
                 if bot_instance:
