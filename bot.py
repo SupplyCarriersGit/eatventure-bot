@@ -43,24 +43,24 @@ class AdaptiveTuner:
         self._adjust_search_timing()
 
     def _adjust_click_timing(self):
-        if self.click_success_rate < 0.85:
-            self.click_delay = min(self.click_delay + 0.01, config.ADAPTIVE_TUNER_MAX_CLICK_DELAY)
-            self.move_delay = min(self.move_delay + 0.001, config.ADAPTIVE_TUNER_MAX_MOVE_DELAY)
-        elif self.click_success_rate > 0.97:
-            self.click_delay = max(self.click_delay - 0.005, config.ADAPTIVE_TUNER_MIN_CLICK_DELAY)
-            self.move_delay = max(self.move_delay - 0.001, config.ADAPTIVE_TUNER_MIN_MOVE_DELAY)
+        if self.click_success_rate < config.ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD:
+            self.click_delay = min(self.click_delay + config.ADAPTIVE_TUNER_CLICK_DELAY_STEP, config.ADAPTIVE_TUNER_MAX_CLICK_DELAY)
+            self.move_delay = min(self.move_delay + config.ADAPTIVE_TUNER_MOVE_DELAY_STEP, config.ADAPTIVE_TUNER_MAX_MOVE_DELAY)
+        elif self.click_success_rate > config.ADAPTIVE_TUNER_CLICK_HIGH_THRESHOLD:
+            self.click_delay = max(self.click_delay - config.ADAPTIVE_TUNER_CLICK_DECREMENT, config.ADAPTIVE_TUNER_MIN_CLICK_DELAY)
+            self.move_delay = max(self.move_delay - config.ADAPTIVE_TUNER_MOVE_DECREMENT, config.ADAPTIVE_TUNER_MIN_MOVE_DELAY)
 
     def _adjust_search_timing(self):
-        if self.search_success_rate < 0.7:
-            self.search_interval = min(self.search_interval + 0.01, config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL)
+        if self.search_success_rate < config.ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD:
+            self.search_interval = min(self.search_interval + config.ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP, config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL)
             self.upgrade_click_interval = min(
-                self.upgrade_click_interval + 0.001,
+                self.upgrade_click_interval + config.ADAPTIVE_TUNER_UPGRADE_INTERVAL_STEP,
                 config.ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL,
             )
-        elif self.search_success_rate > 0.9:
-            self.search_interval = max(self.search_interval - 0.005, config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL)
+        elif self.search_success_rate > config.ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD:
+            self.search_interval = max(self.search_interval - config.ADAPTIVE_TUNER_SEARCH_DECREMENT, config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL)
             self.upgrade_click_interval = max(
-                self.upgrade_click_interval - 0.001,
+                self.upgrade_click_interval - config.ADAPTIVE_TUNER_UPGRADE_DECREMENT,
                 config.ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL,
             )
 
@@ -101,7 +101,7 @@ class VisionOptimizer:
     def _adaptive_alpha(self, confidence):
         if confidence <= 0:
             return self.alpha
-        boost = max(0.0, min(1.0, (confidence - 0.8))) * self.confidence_boost
+        boost = max(0.0, min(1.0, (confidence - config.AI_VISION_CONFIDENCE_THRESHOLD))) * self.confidence_boost
         return min(self.alpha + boost, self.alpha_max)
 
     def update_red_icon_confidences(self, confidences):
@@ -200,8 +200,8 @@ class VisionOptimizer:
             return
         self._box_miss_count = 0
         target = max(
-            0.85,
-            min(confidence, 0.995),
+            config.AI_BOX_THRESHOLD_MIN,
+            min(confidence, config.AI_BOX_THRESHOLD_MAX),
         )
         self.box_threshold = self._ema(
             self.box_threshold,
@@ -282,10 +282,10 @@ class VisionOptimizer:
         if not self.enabled:
             return
         self._box_miss_count += 1
-        if self._box_miss_count < 3:
+        if self._box_miss_count < config.AI_BOX_MISS_WINDOW:
             return
         self._box_miss_count = 0
-        target = max(0.85, self.box_threshold - 0.005)
+        target = max(config.AI_BOX_THRESHOLD_MIN, self.box_threshold - config.AI_BOX_MISS_STEP)
         self.box_threshold = self._ema(self.box_threshold, target, self.alpha_max)
         self._persist()
 
@@ -424,7 +424,7 @@ class HistoricalLearner:
     def stop(self):
         self._stop.set()
         if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=config.AI_LEARNING_THREAD_JOIN_TIMEOUT)
         self._persist()
 
     def record_completion(self, time_spent, source):
@@ -439,7 +439,7 @@ class HistoricalLearner:
         }
         with self._lock:
             self._records.append(record)
-            self._records = self._records[-120:]
+            self._records = self._records[-config.AI_LEARNING_RECORDS_LIMIT:]
             self._total_completions += 1
         self._persist()
 
@@ -568,7 +568,7 @@ class HistoricalLearner:
         if not self.persistence:
             return
         state = {
-            "records": self._records[-120:],
+            "records": self._records[-config.AI_LEARNING_RECORDS_LIMIT:],
             "total_completions": self._total_completions,
             "last_pair_processed": self._last_pair_processed,
             "last_batch_processed": self._last_batch_processed,
@@ -1004,7 +1004,7 @@ class EatventureBot:
         now = time.monotonic()
         
         # Check cooldown after a recent failure to prevent click loops on non-level red icons (e.g. Map rewards)
-        fail_cooldown = 15.0
+        fail_cooldown = config.NEW_LEVEL_FAIL_COOLDOWN
         if now - self._last_new_level_fail_time < fail_cooldown:
             return (False, 0.0, 0, 0)
 
@@ -1069,7 +1069,7 @@ class EatventureBot:
                 template,
                 mask=mask,
                 threshold=threshold,
-                min_distance=80,
+                min_distance=config.RED_ICON_MIN_DISTANCE,
                 template_name=template_name,
             )
             for conf, x, y in icons:
@@ -1202,7 +1202,7 @@ class EatventureBot:
                 template,
                 mask=mask,
                 threshold=threshold,
-                min_distance=80,
+                min_distance=config.RED_ICON_MIN_DISTANCE,
                 template_name=template_name,
             )
 
@@ -1218,13 +1218,15 @@ class EatventureBot:
         self._update_red_template_priority(template_hits)
         return best_confidence > 0, best_confidence
 
-    def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=10, bucket_size=10):
-        bucket_x = x // bucket_size
-        bucket_y = y // bucket_size
+    def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=None, bucket_size=None):
+        prox = proximity if proximity is not None else config.RED_ICON_MERGE_PROXIMITY
+        bsize = bucket_size if bucket_size is not None else config.RED_ICON_MERGE_BUCKET_SIZE
+        bucket_x = x // bsize
+        bucket_y = y // bsize
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for px, py in buckets.get((bucket_x + dx, bucket_y + dy), []):
-                    if abs(x - px) < proximity and abs(y - py) < proximity:
+                    if abs(x - px) < prox and abs(y - py) < prox:
                         detections[(px, py)].append((template_name, conf))
                         return
 
@@ -1484,17 +1486,18 @@ class EatventureBot:
 
     def _build_scroll_segments(self, direction, distance_ratio=None):
         segments = max(1, int(getattr(config, "SCROLL_SEGMENTS", 1)))
-        scroll_ratio = float(getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)) if distance_ratio is None else float(distance_ratio)
-        scroll_ratio = max(0.01, min(1.0, scroll_ratio))
-
+        # distance_ratio is the magnitude of this single scroll action.
+        # In search, this is always 1.0 (one standard step).
+        multiplier = float(distance_ratio if distance_ratio is not None else 1.0)
+        
         start_x, start_y = config.SCROLL_START_POS
-        dist_y = int(config.SCROLL_Y_DISTANCE * scroll_ratio)
+        pixel_step = config.SCROLL_PIXEL_STEP
+        dist_y = int(pixel_step * multiplier)
 
+        full_start_x, full_start_y = start_x, start_y
         if direction == "up":
-            full_start_x, full_start_y = start_x, start_y
             full_end_x, full_end_y = start_x, start_y - dist_y
         else:
-            full_start_x, full_start_y = start_x, start_y
             full_end_x, full_end_y = start_x, start_y + dist_y
 
         end_x, end_y = full_end_x, full_end_y
@@ -1621,20 +1624,16 @@ class EatventureBot:
                 return state_holder["state"]
 
         for i, (from_x, from_y, to_x, to_y) in enumerate(segments):
-            if stop_event.is_set():
+            # Continue even if state_holder["state"] is set, unless it's a level transition
+            if self._new_level_event.is_set():
                 break
-            
-            # Use drag but with a flag or logic that doesn't release the button 
-            # OR manually move the cursor to simulate a steady drag.
-            # Since MouseController.drag already handles mouse down/up internally, 
-            # we'll modify the loop to use move_to for a truly steady drag.
             
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
             min_step_interval = max(0.001, float(getattr(config, "SCROLL_MIN_INTERVAL", 0.005)))
             step_duration = max(min_step_interval, segment_duration / steps)
             
             for step in range(1, steps + 1):
-                if stop_event.is_set() or self._new_level_event.is_set():
+                if self._new_level_event.is_set():
                     break
                 
                 t = step / steps
@@ -1678,7 +1677,7 @@ class EatventureBot:
                         self.work_done = True
                         logger.info(f"✓ {len(self.red_icons)} red icons detected during active scroll segment")
                         _interrupt_to_main_cycle(State.CLICK_RED_ICON, "Red icon detected (Step-Scan)")
-                        break
+                        # NO BREAK: we must finish the scroll accurately
 
         # Always release the mouse button at the end of the scroll sequence
         if segments:
@@ -1739,16 +1738,13 @@ class EatventureBot:
     def execute_oscillating_search(self):
         """
         Implements Continuous Incremental Oscillating Search using a Persistent State Counter.
-        This function performs ONE Up/Down cycle per call and returns.
+        This function performs MULTIPLE standard scrolls (repetition) per cycle.
         """
-        # 1. CALCULATE DISTANCE based on persistent counter
-        unit_ratio = getattr(config, "SCROLL_UNIT_RATIO", 0.05)
-        widening_ratio = self.scroll_cycle_counter * config.SCROLL_STEP_MULTIPLIER * unit_ratio
+        # 1. CALCULATE MULTIPLIER based on persistent counter
+        # widening_multiplier is the number of REPETITIONS of the standard SCROLL_PIXEL_STEP
+        widening_multiplier = self.scroll_cycle_counter * config.SCROLL_STEP_MULTIPLIER
         
-        # Clamp widening ratio between 0.01 and 1.0 for safety
-        widening_ratio = max(0.01, min(1.0, widening_ratio))
-
-        logger.info(f"DEBUG: Starting Cycle {self.scroll_cycle_counter} (Distance Ratio: {widening_ratio:.2f})")
+        logger.info(f"DEBUG: Starting Cycle {self.scroll_cycle_counter} (Repetitions: {widening_multiplier})")
 
         def _interrupt_priority(state):
             if state is None:
@@ -1770,43 +1766,51 @@ class EatventureBot:
                 return new_state
             return current_pending
 
-        # 2. PERFORM THE SEARCH (The "Peek" UP)
-        logger.info(f"Incremental Search: Scrolling UP by {widening_ratio:.2f} ratio")
-        interrupt_state_up = self._scroll_and_scan_for_red_icons(
-            "up",
-            config.SCROLL_DURATION,
-            distance_ratio=widening_ratio,
-        )
-        
-        # Render Wait (using settle delay)
-        time.sleep(max(0.05, getattr(config, "SCROLL_SETTLE_DELAY", 0.15)))
+        pending_state = None
+        settle_delay = max(0.05, getattr(config, "SCROLL_SETTLE_DELAY", 0.15))
 
-        # 3. RETURN TO CENTER (Crucial Step - DOWN)
-        logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Center)")
-        interrupt_state_down = self._scroll_and_scan_for_red_icons(
-            "down",
-            config.SCROLL_DURATION,
-            distance_ratio=widening_ratio,
-        )
-        
-        # Render Wait (using settle delay)
-        time.sleep(max(0.05, getattr(config, "SCROLL_SETTLE_DELAY", 0.15)))
+        # 2. PERFORM THE SEARCH (The "Peek" UP - Multiple standard scrolls)
+        logger.info(f"Incremental Search: Performing {widening_multiplier} sequential scrolls UP")
+        for i in range(widening_multiplier):
+            # Each call correctly starts at SCROLL_START_POS
+            res = self._scroll_and_scan_for_red_icons(
+                "up",
+                config.SCROLL_DURATION,
+                distance_ratio=1.0
+            )
+            pending_state = _merge_interrupt_state(pending_state, res)
+            
+            # Pause after every single scroll action for stability
+            time.sleep(config.SCROLL_INTERVAL_WAIT)
+
+        # 3. RETURN TO CENTER (Crucial Step - DOWN - Multiple standard scrolls)
+        logger.info(f"Incremental Search: Performing {widening_multiplier} sequential scrolls DOWN (Return to Center)")
+        for i in range(widening_multiplier):
+            # Each call correctly starts at SCROLL_START_POS
+            res = self._scroll_and_scan_for_red_icons(
+                "down",
+                config.SCROLL_DURATION,
+                distance_ratio=1.0
+            )
+            pending_state = _merge_interrupt_state(pending_state, res)
+            
+            # Pause after every single scroll action for stability
+            time.sleep(config.SCROLL_INTERVAL_WAIT)
+
+        # Pause to let the game "settle" before calculating the next search cycle
+        logger.info("Cycle complete. Waiting for settle...")
+        time.sleep(config.SEARCH_CYCLE_WAIT)
 
         # 4. INCREMENT THE COUNTER (Persist for NEXT time)
-        # Store detection results before incrementing
-        pending_state = _merge_interrupt_state(None, interrupt_state_up)
-        pending_state = _merge_interrupt_state(pending_state, interrupt_state_down)
-
         self.scroll_cycle_counter += 1
         
         # 5. CHECK RESET CONDITION
-        # Using MAX_SCROLL_CYCLES from config
         if self.scroll_cycle_counter > config.MAX_SCROLL_CYCLES:
             logger.info(f"Max cycles ({config.MAX_SCROLL_CYCLES}) reached. Resetting to 1.")
             self.scroll_cycle_counter = 1
 
         if pending_state:
-            logger.info(f"Interrupt state ({pending_state.name}) found during cycle. Action triggered.")
+            logger.info(f"Interrupt state ({pending_state.name}) found during multi-scroll sequence. Action triggered.")
             return pending_state
 
         return State.FIND_RED_ICONS
@@ -2178,13 +2182,13 @@ class EatventureBot:
         return State.SEARCH_UPGRADE_STATION
     
     def handle_search_upgrade_station(self, current_state):
-        max_attempts = 5
+        max_attempts = config.UPGRADE_STATION_SEARCH_MAX_ATTEMPTS
         base_threshold = (
             self.vision_optimizer.upgrade_station_threshold
             if self.vision_optimizer.enabled
             else config.UPGRADE_STATION_THRESHOLD
         )
-        relaxed_threshold = base_threshold - 0.05
+        relaxed_threshold = base_threshold - config.UPGRADE_STATION_RELAXED_THRESHOLD_DROP
         retry_delay = self.tuner.search_interval
         
         for attempt in range(max_attempts):
@@ -2193,7 +2197,7 @@ class EatventureBot:
             if "upgradeStation" in self.templates:
                 template, mask = self.templates["upgradeStation"]
                 
-                current_threshold = base_threshold if attempt < 2 else relaxed_threshold
+                current_threshold = base_threshold if attempt < config.UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER else relaxed_threshold
                 
                 found, confidence, x, y = self.image_matcher.find_template(
                     limited_screenshot, template, mask=mask,
@@ -2552,10 +2556,10 @@ class EatventureBot:
     def handle_transition_level(self, current_state):
         self._click_idle()
         
-        max_attempts = 5
+        max_attempts = config.LEVEL_TRANSITION_MAX_ATTEMPTS
         
         # Check if we already marked completion recently (e.g. via override)
-        if self.completion_detected_time and (datetime.now() - self.completion_detected_time).total_seconds() < 5.0:
+        if self.completion_detected_time and (datetime.now() - self.completion_detected_time).total_seconds() < config.LEVEL_COMPLETION_RECENCY_WINDOW:
             logger.info("Completion already marked recently; proceeding to transition bookkeeping")
             return self._finalize_transition()
 
