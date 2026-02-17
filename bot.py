@@ -1803,7 +1803,7 @@ class EatventureBot:
 
         # 1. Scroll Up by N units (Widen Up)
         logger.info(f"Incremental Search: Scrolling UP by {widening_ratio:.2f} ratio")
-        interrupt_state_up = self._scroll_and_scan_for_red_icons(
+        interrupt_state = self._scroll_and_scan_for_red_icons(
             "up",
             config.SCROLL_DURATION,
             distance_ratio=widening_ratio,
@@ -1823,7 +1823,7 @@ class EatventureBot:
             return State.TRANSITION_LEVEL
 
         # 2. Scroll Down N units (Return to Start)
-        logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
+        logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Start)")
         interrupt_state = self._scroll_and_scan_for_red_icons(
             "down",
             config.SCROLL_DURATION,
