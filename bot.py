@@ -620,9 +620,8 @@ class EatventureBot:
         self.wait_for_unlock_attempts = 0
         self.max_wait_for_unlock_attempts = getattr(config, "WAIT_FOR_UNLOCK_MAX_ATTEMPTS", 50)
         
-        self.scroll_direction = 'down'
-        self.scroll_count = 0
-        self.max_scroll_count = max(1, int(getattr(config, "MAX_SCROLL_CYCLES", 5)))
+        # Legacy directional scroll state removed.
+        # One-Scroll Rule: execute_oscillating_search() is the only scroll driver.
         self.work_done = False
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
@@ -776,68 +775,16 @@ class EatventureBot:
         return clicked
 
     def _scroll_away_from_forbidden_zone(self, y_position):
-        if self.forbidden_icon_scrolls >= config.FORBIDDEN_ICON_MAX_SCROLLS:
-            logger.warning("Max forbidden-icon scrolls reached; skipping icon")
-            return False
-
-        if y_position >= config.FORBIDDEN_ZONE_5_Y_MIN or y_position >= config.FORBIDDEN_CLICK_Y_MIN:
-            direction = "up"
-        elif y_position <= config.FORBIDDEN_ZONE_6_Y_MAX or y_position <= config.FORBIDDEN_ZONE_4_Y_MAX:
-            direction = "down"
-        else:
-            direction = self.scroll_direction
-
-        if direction == "up":
-            logger.info("Red icon in forbidden zone → scrolling up to clear")
-            segments = self._build_scroll_segments("up", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
-            seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
-            
-            if segments:
-                from_x, from_y, _, _ = segments[0]
-                self.mouse_controller.mouse_down(from_x, from_y, relative=True)
-
-            for from_x, from_y, to_x, to_y in segments:
-                steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-                step_duration = seg_duration / steps
-                for step in range(1, steps + 1):
-                    t = step / steps
-                    curr_x = int(from_x + (to_x - from_x) * t)
-                    curr_y = int(from_y + (to_y - from_y) * t)
-                    self.mouse_controller.move_to(curr_x, curr_y, relative=True)
-                    time.sleep(step_duration)
-
-            if segments:
-                _, _, last_to_x, last_to_y = segments[-1]
-                self.mouse_controller.mouse_up(last_to_x, last_to_y, relative=True)
-        else:
-            logger.info("Red icon in forbidden zone → scrolling down to clear")
-            segments = self._build_scroll_segments("down", distance_ratio=getattr(config, "SCROLL_DISTANCE_RATIO", 1.0))
-            seg_duration = max(0.001, config.FORBIDDEN_ICON_SCROLL_DURATION / max(1, len(segments)))
-            
-            if segments:
-                from_x, from_y, _, _ = segments[0]
-                self.mouse_controller.mouse_down(from_x, from_y, relative=True)
-
-            for from_x, from_y, to_x, to_y in segments:
-                steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-                step_duration = seg_duration / steps
-                for step in range(1, steps + 1):
-                    t = step / steps
-                    curr_x = int(from_x + (to_x - from_x) * t)
-                    curr_y = int(from_y + (to_y - from_y) * t)
-                    self.mouse_controller.move_to(curr_x, curr_y, relative=True)
-                    time.sleep(step_duration)
-
-            if segments:
-                _, _, last_to_x, last_to_y = segments[-1]
-                self.mouse_controller.mouse_up(last_to_x, last_to_y, relative=True)
-
-        self._click_idle()
-        if config.FORBIDDEN_ICON_SCROLL_COOLDOWN > 0:
-            if self._sleep_with_interrupt(config.FORBIDDEN_ICON_SCROLL_COOLDOWN):
-                return False  # Or handle interrupt, though this returns bool usually
-        self.forbidden_icon_scrolls += 1
-        return True
+        # Disabled intentionally.
+        #
+        # One-Scroll Rule: all scrolling must be performed only by
+        # execute_oscillating_search(). Forbidden-zone handling now skips the
+        # blocked icon instead of performing an ad-hoc directional scroll.
+        logger.info(
+            "Red icon in forbidden zone at y=%s; skipping icon (ad-hoc forbidden-zone scrolling disabled)",
+            y_position,
+        )
+        return False
 
     def resolve_priority_state(self, current_state):
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL, State.WAIT_FOR_UNLOCK):
@@ -1777,7 +1724,7 @@ class EatventureBot:
         return State.CLICK_RED_ICON
 
     
-    def execute_search_pattern(self):
+    def execute_oscillating_search(self):
         """
         Implements Incremental Oscillating Search logic:
         Cycle 1: Up 1 -> Check -> Down 1 (Start) -> Check
@@ -1810,17 +1757,27 @@ class EatventureBot:
         )
         if interrupt_state is not None:
             if interrupt_state == State.CLICK_RED_ICON:
-                logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
+                logger.info("Red Icon found during Incremental UP scroll! Completing DOWN return before state switch.")
             else:
                 logger.info(
-                    "Interrupt asset/state (%s) found during Incremental UP scroll; switching state without resetting search cycle.",
+                    "Interrupt asset/state (%s) found during Incremental UP scroll; completing DOWN return before state switch.",
                     interrupt_state.name,
                 )
-            return interrupt_state
 
-        settle_delay = max(0.0, float(getattr(config, "SCROLL_SETTLE_DELAY", 0.0)))
-        if settle_delay > 0 and self._sleep_with_interrupt(settle_delay):
+        turnaround_wait = max(
+            0.05,
+            float(
+                getattr(
+                    config,
+                    "OSCILLATION_TURNAROUND_WAIT",
+                    getattr(config, "SCROLL_SETTLE_DELAY", 0.15),
+                )
+            ),
+        )
+        if self._sleep_with_interrupt(turnaround_wait):
             return State.TRANSITION_LEVEL
+
+        pending_state = interrupt_state
 
         # 2. Scroll Down N units (Return to Start)
         logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Start)")
@@ -1837,12 +1794,12 @@ class EatventureBot:
                     "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
                     interrupt_state.name,
                 )
-            return interrupt_state
+            pending_state = interrupt_state
 
-        if settle_delay > 0 and self._sleep_with_interrupt(settle_delay):
+        if self._sleep_with_interrupt(turnaround_wait):
             return State.TRANSITION_LEVEL
 
-        return State.FIND_RED_ICONS
+        return pending_state or State.FIND_RED_ICONS
 
     def _get_max_search_cycles(self):
         """
@@ -2557,7 +2514,7 @@ class EatventureBot:
         # We now rely entirely on the Incremental Oscillating Search pattern
         # when the bot enters the SCROLL state (which happens when no icons are found).
         logger.info("Executing Incremental Oscillating Search")
-        return self.execute_search_pattern()
+        return self.execute_oscillating_search()
     
     def handle_check_new_level(self, current_state):
         self._click_idle()
@@ -2595,8 +2552,6 @@ class EatventureBot:
             if self._sleep_with_interrupt(followup_delay):
                 return State.TRANSITION_LEVEL
 
-        self.scroll_direction = 'down'
-        self.scroll_count = 0
         return State.TRANSITION_LEVEL
     
     def handle_transition_level(self, current_state):
@@ -2649,8 +2604,6 @@ class EatventureBot:
         
         logger.warning("New level button not found after 5 attempts")
         self._last_new_level_fail_time = time.monotonic()
-        self.scroll_direction = 'down'
-        self.scroll_count = 0
         return State.FIND_RED_ICONS
 
     def _finalize_transition(self):
@@ -2688,8 +2641,6 @@ class EatventureBot:
         if self.wait_for_unlock_attempts > self.max_wait_for_unlock_attempts:
             logger.warning(f"Unlock button not found after {self.max_wait_for_unlock_attempts} attempts, resetting to scroll")
             self.wait_for_unlock_attempts = 0
-            self.scroll_direction = 'down'
-            self.scroll_count = 0
             return State.FIND_RED_ICONS
         
         screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
@@ -2709,8 +2660,6 @@ class EatventureBot:
                         return State.TRANSITION_LEVEL
                 logger.info("Starting new level")
                 self.wait_for_unlock_attempts = 0
-                self.scroll_direction = 'down'
-                self.scroll_count = 0
                 return State.FIND_RED_ICONS
         
         if config.WAIT_UNLOCK_RETRY_DELAY > 0:
