@@ -1808,16 +1808,12 @@ class EatventureBot:
         if interrupt_state is not None:
             if interrupt_state == State.CLICK_RED_ICON:
                 logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
-                return interrupt_state
-            if interrupt_state == State.FIND_RED_ICONS:
-                logger.info(
-                    "Non-actionable FIND_RED_ICONS interrupt during Incremental UP scroll; continuing DOWN leg to return to start.")
             else:
                 logger.info(
                     "Interrupt asset/state (%s) found during Incremental UP scroll; switching state without resetting search cycle.",
                     interrupt_state.name,
                 )
-                return interrupt_state
+            return interrupt_state
 
         # 2. Scroll Down N units (Return to Start)
         logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
@@ -1829,16 +1825,12 @@ class EatventureBot:
         if interrupt_state is not None:
             if interrupt_state == State.CLICK_RED_ICON:
                 logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
-                return interrupt_state
-            if interrupt_state == State.FIND_RED_ICONS:
-                logger.info(
-                    "Non-actionable FIND_RED_ICONS interrupt during Incremental DOWN scroll; returning to scan state.")
             else:
                 logger.info(
                     "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
                     interrupt_state.name,
                 )
-                return interrupt_state
+            return interrupt_state
 
         return State.FIND_RED_ICONS
 
