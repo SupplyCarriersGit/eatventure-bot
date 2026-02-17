@@ -41,6 +41,13 @@ def on_press(key):
                     else:
                         bot_instance.stop()
                         bot_instance.telegram.notify_bot_stopped()
+            elif key.char == 'c':
+                logger = logging.getLogger(__name__)
+                if bot_instance:
+                    logger.info("[C pressed] Wiping AI memory...")
+                    bot_instance.wipe_memory()
+                else:
+                    logger.info("[C pressed] Bot not initialized yet")
             elif key.char == 'p':
                 logger = logging.getLogger(__name__)
                 logger.info("[P pressed] Exiting program...")

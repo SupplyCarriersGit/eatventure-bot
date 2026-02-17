@@ -65,6 +65,15 @@ class AdaptiveTuner:
                 config.ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL,
             )
 
+    def reset(self):
+        self.click_success_rate = 1.0
+        self.search_success_rate = 1.0
+        self.click_delay = config.CLICK_DELAY
+        self.move_delay = config.MOUSE_MOVE_DELAY
+        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
+        self.search_interval = config.UPGRADE_SEARCH_INTERVAL
+        logger.info("AdaptiveTuner reset to defaults")
+
 
 class VisionOptimizer:
     def __init__(self, persistence=None):
@@ -281,6 +290,22 @@ class VisionOptimizer:
         self.box_threshold = self._ema(self.box_threshold, target, self.alpha_max)
         self._persist()
 
+    def reset(self):
+        self.red_icon_threshold = config.RED_ICON_THRESHOLD
+        self.new_level_threshold = config.NEW_LEVEL_THRESHOLD
+        self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
+        self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
+        self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
+        self.box_threshold = config.BOX_THRESHOLD
+        self._red_icon_miss_count = 0
+        self._new_level_miss_count = 0
+        self._new_level_red_icon_miss_count = 0
+        self._upgrade_station_miss_count = 0
+        self._stats_upgrade_miss_count = 0
+        self._box_miss_count = 0
+        self._persist(force=True)
+        logger.info("VisionOptimizer reset to defaults")
+
     def apply_persisted_state(self, state):
         if not state:
             return
@@ -297,7 +322,7 @@ class VisionOptimizer:
         if "box_threshold" in state:
             self.box_threshold = float(state["box_threshold"])
 
-    def _persist(self):
+    def _persist(self, force=False):
         if not self.persistence:
             return
         state = {
@@ -308,7 +333,7 @@ class VisionOptimizer:
             "stats_upgrade_threshold": self.stats_upgrade_threshold,
             "box_threshold": self.box_threshold,
         }
-        self.persistence.save({key: float(value) for key, value in state.items()})
+        self.persistence.save({key: float(value) for key, value in state.items()}, force=force)
 
 
 class VisionPersistence:
@@ -333,11 +358,11 @@ class VisionPersistence:
             )
             return {}
 
-    def save(self, state):
+    def save(self, state, force=False):
         if not self.path:
             return
         now = time.monotonic()
-        if self.save_interval > 0 and now - self._last_save_time < self.save_interval:
+        if not force and self.save_interval > 0 and now - self._last_save_time < self.save_interval:
             return
         directory = os.path.dirname(self.path)
         if directory:
@@ -540,7 +565,7 @@ class HistoricalLearner:
         self._tuned_behavior = tuned
         self.bot.apply_learned_behavior(tuned, reason=label, best_time=record.get("time_spent", 0.0))
 
-    def _persist(self):
+    def _persist(self, force=False):
         if not self.persistence:
             return
         state = {
@@ -550,7 +575,17 @@ class HistoricalLearner:
             "last_batch_processed": self._last_batch_processed,
             "tuned_behavior": self._tuned_behavior,
         }
-        self.persistence.save(state)
+        self.persistence.save(state, force=force)
+
+    def reset(self):
+        with self._lock:
+            self._records = []
+            self._total_completions = 0
+            self._last_pair_processed = 0
+            self._last_batch_processed = 0
+            self._tuned_behavior = {}
+        self._persist(force=True)
+        logger.info("HistoricalLearner reset to defaults")
 
 
 class EatventureBot:
@@ -1859,6 +1894,22 @@ class EatventureBot:
         required.update(["newLevel", "unlock", "upgradeStation"])
         required.update(box_names)
         return required
+    
+    def wipe_memory(self):
+        logger.info("Wiping AI memory...")
+        self.tuner.reset()
+        self.vision_optimizer.reset()
+        self.historical_learner.reset()
+        
+        self._red_template_hit_counts = {}
+        self._red_template_priority = []
+        self._red_template_last_seen = {}
+        self._recent_red_icon_history = []
+        
+        # Apply the defaults back to mouse controller
+        self._apply_tuning()
+        
+        logger.info("AI memory wiped successfully. Bot starting fresh.")
     
     def register_states(self):
         self.state_machine.register_handler(State.FIND_RED_ICONS, self.handle_find_red_icons)
