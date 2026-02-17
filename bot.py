@@ -1733,20 +1733,18 @@ class EatventureBot:
         Cycle N: Up N -> Check -> Down N (Start) -> Check
         """
         max_search_cycles = self._get_max_search_cycles()
-        self.search_attempt_counter += 1
-        if self.search_attempt_counter > max_search_cycles:
-            logger.info("MAX search cycles (%s) reached. Resetting search cycle.", max_search_cycles)
-            self.search_attempt_counter = 1
+        current_cycle = max(1, int(self.search_attempt_counter or 1))
 
         multiplier = config.SCROLL_STEP_MULTIPLIER
         unit_ratio = getattr(config, "SCROLL_UNIT_RATIO", 0.05)
         # widening distance ratio is the distance to scroll away from center
-        widening_ratio = self.search_attempt_counter * multiplier * unit_ratio
+        widening_ratio = current_cycle * multiplier * unit_ratio
         
         # Clamp widening ratio between 0.01 and 1.0 for safety
         widening_ratio = max(0.01, min(1.0, widening_ratio))
 
-        logger.info(f"--- Continuous Search Cycle {self.search_attempt_counter} (Widening Ratio: {widening_ratio:.2f}) ---")
+        logger.info(f"DEBUG: Starting Cycle {current_cycle} - Distance: {widening_ratio:.2f}")
+        logger.info(f"--- Continuous Search Cycle {current_cycle} (Widening Ratio: {widening_ratio:.2f}) ---")
 
         def _interrupt_priority(state):
             if state is None:
@@ -1794,10 +1792,11 @@ class EatventureBot:
                 )
             ),
         )
-        if self._sleep_with_interrupt(turnaround_wait):
-            return State.TRANSITION_LEVEL
-
         pending_state = _merge_interrupt_state(None, interrupt_state)
+
+        turnaround_interrupted = self._sleep_with_interrupt(turnaround_wait)
+        if turnaround_interrupted:
+            pending_state = _merge_interrupt_state(pending_state, State.TRANSITION_LEVEL)
 
         # 2. Scroll Down N units (Return to Start)
         logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Start)")
@@ -1816,8 +1815,14 @@ class EatventureBot:
                 )
             pending_state = _merge_interrupt_state(pending_state, interrupt_state)
 
-        if self._sleep_with_interrupt(turnaround_wait):
-            return State.TRANSITION_LEVEL
+        turnaround_interrupted = self._sleep_with_interrupt(turnaround_wait)
+        if turnaround_interrupted:
+            pending_state = _merge_interrupt_state(pending_state, State.TRANSITION_LEVEL)
+
+        self.search_attempt_counter = current_cycle + 1
+        if self.search_attempt_counter > max_search_cycles:
+            logger.info("MAX search cycles (%s) reached. Resetting search cycle.", max_search_cycles)
+            self.search_attempt_counter = 1
 
         return pending_state or State.FIND_RED_ICONS
 
