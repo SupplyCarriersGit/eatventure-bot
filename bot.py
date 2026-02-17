@@ -1778,59 +1778,66 @@ class EatventureBot:
     
     def execute_search_pattern(self):
         """
-        Implements Incremental Oscillating Search logic:
-        Cycle 1: Up 1 -> Check -> Down 1 (Start) -> Check
-        Cycle 2: Up 2 -> Check -> Down 2 (Start) -> Check
-        ...
-        Cycle N: Up N -> Check -> Down N (Start) -> Check
+        Implements Continuous Incremental Oscillating Search logic:
+        Cycle 1: Up N -> Check for Red Icon -> Down N (Return to Center) -> Check for Red Icon.
+        Cycle 2: Up N+1 -> Check for Red Icon -> Down N+1 (Return to Center) -> Check for Red Icon.
+        The widening distance is Cycle * SCROLL_STEP_MULTIPLIER * SCROLL_UNIT_RATIO.
+        The counter ONLY resets when it reaches MAX_SEARCH_CYCLES.
         """
         self.search_attempt_counter += 1
-        if self.search_attempt_counter > config.MAX_SEARCH_ATTEMPTS:
-            logger.info("MAX_SEARCH_ATTEMPTS reached. Resetting search cycle.")
+        if self.search_attempt_counter > config.MAX_SEARCH_CYCLES:
+            logger.info("MAX_SEARCH_CYCLES reached. Resetting incremental search cycle to 1.")
             self.search_attempt_counter = 1
 
         multiplier = config.SCROLL_STEP_MULTIPLIER
-        current_distance = self.search_attempt_counter * multiplier
+        unit_ratio = getattr(config, "SCROLL_UNIT_RATIO", 0.05)
+        # widening distance ratio is the distance to scroll away from center
+        widening_ratio = self.search_attempt_counter * multiplier * unit_ratio
         
-        logger.info(f"--- Search Cycle {self.search_attempt_counter} (Distance: {current_distance}) ---")
+        # Clamp widening ratio between 0.01 and 1.0 for safety
+        widening_ratio = max(0.01, min(1.0, widening_ratio))
 
-        # 1. Scroll Up N units
-        logger.info(f"Incremental Search: Scrolling UP {current_distance} units")
-        # We use a custom distance ratio for this incremental step
-        # Assuming SCROLL_DISTANCE_RATIO 1.0 is the base 'unit'
-        step_ratio = current_distance * getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
-        
-        interrupt_state = self._scroll_and_scan_for_red_icons(
+        logger.info(f"--- Continuous Search Cycle {self.search_attempt_counter} (Widening Ratio: {widening_ratio:.2f}) ---")
+
+        # 1. Scroll Up by N units (Widen Up)
+        logger.info(f"Incremental Search: Scrolling UP by {widening_ratio:.2f} ratio")
+        interrupt_state_up = self._scroll_and_scan_for_red_icons(
             "up",
             config.SCROLL_DURATION,
-            distance_ratio=step_ratio,
+            distance_ratio=widening_ratio,
         )
-        if interrupt_state is not None:
-            if interrupt_state == State.CLICK_RED_ICON:
-                logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
-            else:
-                logger.info(
-                    "Interrupt asset/state (%s) found during Incremental UP scroll; switching state without resetting search cycle.",
-                    interrupt_state.name,
-                )
-            return interrupt_state
-
-        # 2. Scroll Down N units (Return to Start)
-        logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
-        interrupt_state = self._scroll_and_scan_for_red_icons(
+        
+        # 2. Scroll Down by N units (Return to Center)
+        logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Center)")
+        # We MUST return to start exactly to keep the widening logic stable
+        interrupt_state_down = self._scroll_and_scan_for_red_icons(
             "down",
             config.SCROLL_DURATION,
-            distance_ratio=step_ratio,
+            distance_ratio=widening_ratio,
         )
-        if interrupt_state is not None:
-            if interrupt_state == State.CLICK_RED_ICON:
-                logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
-            else:
-                logger.info(
-                    "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
-                    interrupt_state.name,
-                )
-            return interrupt_state
+
+        # 3. Action Trigger: Priority selection of states found during oscillation
+        priority = {
+            State.TRANSITION_LEVEL: 10,
+            State.CHECK_UNLOCK: 5,
+            State.SEARCH_UPGRADE_STATION: 5,
+            State.OPEN_BOXES: 5,
+            State.CLICK_RED_ICON: 1,
+        }
+        
+        final_state = None
+        for s in (interrupt_state_up, interrupt_state_down):
+            if s is not None:
+                if final_state is None or priority.get(s, 0) > priority.get(final_state, 0):
+                    final_state = s
+
+        if final_state:
+            logger.info(
+                "Interrupt state (%s) found during oscillation; triggering action. Search will proceed to Cycle %s next time.",
+                final_state.name,
+                self.search_attempt_counter + 1,
+            )
+            return final_state
 
         return State.FIND_RED_ICONS
 
