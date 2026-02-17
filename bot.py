@@ -1730,7 +1730,7 @@ class EatventureBot:
         monitor_thread.join(timeout=0.2)
         return state_holder["state"]
 
-    def _scroll_and_scan_for_red_icons(self, direction, scroll_duration):
+    def _scroll_and_scan_for_red_icons(self, direction, scroll_duration, distance_ratio=None):
         if direction == "up":
             logger.info("⬆ Scroll UP (scan, segmented)")
         else:
@@ -1740,6 +1740,7 @@ class EatventureBot:
             direction,
             scroll_duration,
             scan_for_red_icons=True,
+            distance_ratio=distance_ratio,
         )
         if interrupt_state is not None:
             return interrupt_state
@@ -1799,17 +1800,45 @@ class EatventureBot:
         # Assuming SCROLL_DISTANCE_RATIO 1.0 is the base 'unit'
         step_ratio = current_distance * getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
         
-        interrupt_state = self._scroll_and_scan_for_red_icons("up", config.SCROLL_DURATION)
-        if interrupt_state == State.CLICK_RED_ICON:
-            logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
-            return State.CLICK_RED_ICON
+        interrupt_state = self._scroll_and_scan_for_red_icons(
+            "up",
+            config.SCROLL_DURATION,
+            distance_ratio=step_ratio,
+        )
+        if interrupt_state is not None:
+            if interrupt_state == State.CLICK_RED_ICON:
+                logger.info("Red Icon found during Incremental UP scroll! Continuing search pattern in next cycle.")
+                return interrupt_state
+            if interrupt_state == State.FIND_RED_ICONS:
+                logger.info(
+                    "Non-actionable FIND_RED_ICONS interrupt during Incremental UP scroll; continuing DOWN leg to return to start.")
+            else:
+                logger.info(
+                    "Interrupt asset/state (%s) found during Incremental UP scroll; switching state without resetting search cycle.",
+                    interrupt_state.name,
+                )
+                return interrupt_state
 
         # 2. Scroll Down N units (Return to Start)
         logger.info(f"Incremental Search: Scrolling DOWN {current_distance} units (Return to Start)")
-        interrupt_state = self._scroll_and_scan_for_red_icons("down", config.SCROLL_DURATION)
-        if interrupt_state == State.CLICK_RED_ICON:
-            logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
-            return State.CLICK_RED_ICON
+        interrupt_state = self._scroll_and_scan_for_red_icons(
+            "down",
+            config.SCROLL_DURATION,
+            distance_ratio=step_ratio,
+        )
+        if interrupt_state is not None:
+            if interrupt_state == State.CLICK_RED_ICON:
+                logger.info("Red Icon found during Incremental DOWN scroll! Continuing search pattern in next cycle.")
+                return interrupt_state
+            if interrupt_state == State.FIND_RED_ICONS:
+                logger.info(
+                    "Non-actionable FIND_RED_ICONS interrupt during Incremental DOWN scroll; returning to scan state.")
+            else:
+                logger.info(
+                    "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
+                    interrupt_state.name,
+                )
+                return interrupt_state
 
         return State.FIND_RED_ICONS
 
