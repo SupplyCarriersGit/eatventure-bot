@@ -1748,6 +1748,26 @@ class EatventureBot:
 
         logger.info(f"--- Continuous Search Cycle {self.search_attempt_counter} (Widening Ratio: {widening_ratio:.2f}) ---")
 
+        def _interrupt_priority(state):
+            if state is None:
+                return -1
+            priority_order = {
+                State.TRANSITION_LEVEL: 100,
+                State.CHECK_NEW_LEVEL: 90,
+                State.WAIT_FOR_UNLOCK: 80,
+                State.CLICK_RED_ICON: 10,
+            }
+            return priority_order.get(state, 50)
+
+        def _merge_interrupt_state(current_pending, new_state):
+            if new_state is None:
+                return current_pending
+            if current_pending is None:
+                return new_state
+            if _interrupt_priority(new_state) > _interrupt_priority(current_pending):
+                return new_state
+            return current_pending
+
         # 1. Scroll Up by N units (Widen Up)
         logger.info(f"Incremental Search: Scrolling UP by {widening_ratio:.2f} ratio")
         interrupt_state = self._scroll_and_scan_for_red_icons(
@@ -1777,7 +1797,7 @@ class EatventureBot:
         if self._sleep_with_interrupt(turnaround_wait):
             return State.TRANSITION_LEVEL
 
-        pending_state = interrupt_state
+        pending_state = _merge_interrupt_state(None, interrupt_state)
 
         # 2. Scroll Down N units (Return to Start)
         logger.info(f"Incremental Search: Scrolling DOWN by {widening_ratio:.2f} ratio (Return to Start)")
@@ -1794,7 +1814,7 @@ class EatventureBot:
                     "Interrupt asset/state (%s) found during Incremental DOWN scroll; switching state without resetting search cycle.",
                     interrupt_state.name,
                 )
-            pending_state = interrupt_state
+            pending_state = _merge_interrupt_state(pending_state, interrupt_state)
 
         if self._sleep_with_interrupt(turnaround_wait):
             return State.TRANSITION_LEVEL
