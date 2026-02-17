@@ -356,6 +356,8 @@ class MouseController:
             duration = max(duration, 0.001)
             start_time = time.monotonic()
             interrupted = False
+            current_x = int(screen_from_x)
+            current_y = int(screen_from_y)
             for i in range(steps + 1):
                 if interrupt_check and interrupt_check():
                     logger.info("Drag interrupted by callback")
