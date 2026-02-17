@@ -678,6 +678,14 @@ class EatventureBot:
         logger.info("Bot initialized successfully")
 
     def _record_new_level_interrupt(self, source, confidence, x, y):
+        if self._should_ignore_new_level_signal(source=source):
+            logger.debug(
+                "Ignoring background %s signal while in %s",
+                source,
+                self.state_machine.get_state_name(),
+            )
+            return
+
         self._new_level_interrupt = {
             "source": source,
             "confidence": confidence,
@@ -693,7 +701,21 @@ class EatventureBot:
             return None
         interrupt = self._new_level_interrupt
         self._new_level_event.clear()
+        if interrupt and self._should_ignore_new_level_signal(source=interrupt.get("source")):
+            return None
         return interrupt
+
+    def _should_ignore_new_level_signal(self, source, state=None):
+        if source != "new level red icon":
+            return False
+        active_state = state or self.state_machine.get_state()
+        critical_states = (
+            State.WAIT_FOR_UNLOCK,
+            State.CHECK_UNLOCK,
+            State.SEARCH_UPGRADE_STATION,
+            State.HOLD_UPGRADE_STATION,
+        )
+        return active_state in critical_states
 
     def _monitor_new_level(self):
         interval = config.NEW_LEVEL_MONITOR_INTERVAL
@@ -983,6 +1005,11 @@ class EatventureBot:
             remaining = target_time - now
             time.sleep(min(interval, remaining))
             if self._new_level_event.is_set():
+                interrupt = self._new_level_interrupt
+                if interrupt and self._should_ignore_new_level_signal(source=interrupt.get("source")):
+                    self._new_level_event.clear()
+                    now = time.monotonic()
+                    continue
                 return True
             if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return True
@@ -1150,8 +1177,7 @@ class EatventureBot:
             
             # During critical station interaction phases, only interrupt if we see the actual 
             # renovation button, never just the red icon on the map which could be a reward.
-            critical_states = (State.WAIT_FOR_UNLOCK, State.CHECK_UNLOCK, State.SEARCH_UPGRADE_STATION, State.HOLD_UPGRADE_STATION)
-            if self.state_machine.get_state() in critical_states and source == "new level red icon":
+            if self._should_ignore_new_level_signal(source=source):
                 return False
 
             if source == "new level red icon":
