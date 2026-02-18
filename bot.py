@@ -2205,6 +2205,9 @@ class EatventureBot:
             logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
+            # Reset oscillation cycle after positive target acquisition so the
+            # next search pass starts from a tight scan window.
+            self.search_attempt_counter = 1
             self.work_done = True
             return State.CLICK_RED_ICON
     
