@@ -626,8 +626,9 @@ class EatventureBot:
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
         self.forbidden_icon_scrolls = 0
-        self.search_attempt_counter = 1
+        self.current_scroll_count = 1
         self.scroll_offset_units = 0  # Tracks vertical drift from center
+        self.config = config
         
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
@@ -1635,6 +1636,10 @@ class EatventureBot:
             if scroll_icons:
                 filtered_icons, _ = self._filter_forbidden_red_icons(scroll_icons)
                 if filtered_icons:
+                    self.red_icons = self._prioritize_red_icons(filtered_icons)
+                    self.current_red_icon_index = 0
+                    self.red_icon_cycle_count = 0
+                    self.work_done = True
                     return "RedIcon-group", filtered_icons[0][0], State.CLICK_RED_ICON
 
             # 2. Check for other UI assets (unlock, upgradeStation, boxes)
@@ -1839,93 +1844,119 @@ class EatventureBot:
         return State.CLICK_RED_ICON
 
     
-    def _increment_scroll_cycle(self):
-        """
-        Increments the search cycle counter and handles the MAX_SCROLL_CYCLES reset.
-        """
-        old_val = self.search_attempt_counter
-        self.search_attempt_counter += 1
-        if self.search_attempt_counter > config.MAX_SCROLL_CYCLES:
-            logger.info(f"Max search cycles ({config.MAX_SCROLL_CYCLES}) reached. Resetting to Cycle 1.")
-            self.search_attempt_counter = 1
-        logger.debug(f"Search cycle incremented: {old_val} -> {self.search_attempt_counter}")
+    def scroll_up(self):
+        """Helper to scroll up by 1 unit."""
+        self._scroll_with_background_asset_detection(
+            "up",
+            config.SCROLL_DURATION,
+            scan_for_red_icons=False,
+            distance_ratio=1.0,
+        )
+
+    def scroll_down(self):
+        """Helper to scroll down by 1 unit."""
+        self._scroll_with_background_asset_detection(
+            "down",
+            config.SCROLL_DURATION,
+            scan_for_red_icons=False,
+            distance_ratio=1.0,
+        )
+
+    def check_for_red_icon(self):
+        """Helper to scan for red icons or other assets. Returns a State if found, else None."""
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        
+        # 1. Check for Level Transition
+        if self._should_interrupt_for_new_level(screenshot=screenshot, force=True):
+            return State.TRANSITION_LEVEL
+
+        # 2. Check for Red Icons
+        red_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
+        if red_icons:
+            filtered, _ = self._filter_forbidden_red_icons(red_icons)
+            if filtered:
+                self.red_icons = self._prioritize_red_icons(filtered)
+                self.current_red_icon_index = 0
+                self.red_icon_cycle_count = 0
+                self.work_done = True
+                return State.CLICK_RED_ICON
+        
+        # 3. Check for Fallback Assets
+        clicked = self._scan_and_click_non_red_assets(screenshot)
+        if clicked > 0:
+            return State.FIND_RED_ICONS
+            
+        return None
 
     def execute_oscillating_search(self):
         """
-        Implements Continuous Incremental Oscillating Search with Mirror Protocol.
-        Phase 1: UP N scrolls.
-        Phase 2: DOWN N scrolls (Return to center).
+        Implements Continuous Incremental Oscillating Search with Arithmetic Progression.
+        PHASE 1: THE CLIMB (Accumulate Distance)
+        PHASE 2: THE RETURN (Reset Distance)
+        PHASE 3: END OF CYCLE
         """
-        cycle = self.search_attempt_counter
-        n_scrolls = cycle * config.SCROLL_STEP_MULTIPLIER
-        logger.info("DEBUG: Starting Search Cycle %s (Intervals: %s)", cycle, n_scrolls)
+        # Get the current number of repetitions (e.g., 1, 3, 5...)
+        current_reps = self.current_scroll_count
+        
+        # ====================================================
+        # PHASE 1: THE CLIMB (Accumulate Distance)
+        # ====================================================
+        # This loop MUST complete fully before Phase 2 begins.
+        print(f"DEBUG: Starting Phase 1 (UP) - {current_reps} steps.")
+        
+        for i in range(current_reps):
+            self.scroll_up()
+            time.sleep(self.config.SCROLL_INTERVAL_PAUSE)
+            
+            # Check for assets between steps
+            target_state = self.check_for_red_icon()
+            if target_state: 
+                # Break immediately if a target is found
+                print(f"DEBUG: Asset found during Phase 1 at step {i+1}")
+                return target_state 
 
-        interval_pause = config.SCROLL_INTERVAL_WAIT
+        # ====================================================
+        # PHASE 2: THE RETURN (Reset Distance)
+        # ====================================================
+        # This loop is OUTSIDE the Phase 1 loop.
+        # It runs only after the bot has reached the top of the search area.
+        print(f"DEBUG: Starting Phase 2 (DOWN) - {current_reps} steps.")
+        
+        for i in range(current_reps):
+            self.scroll_down()
+            time.sleep(self.config.SCROLL_INTERVAL_PAUSE)
+            
+            # Check for assets on the way back
+            target_state = self.check_for_red_icon()
+            if target_state: 
+                print(f"DEBUG: Asset found during Phase 2 at step {i+1}")
+                return target_state
 
-        logger.info("PHASE 1: Performing %s sequential scrolls UP", n_scrolls)
-        for interval_index in range(1, n_scrolls + 1):
-            up_res = self._scroll_and_scan_for_red_icons(
-                "up",
-                config.SCROLL_DURATION,
-                distance_ratio=1.0,
-            )
-            if up_res:
-                logger.info(
-                    "Interrupt detected after UP interval %s/%s: %s",
-                    interval_index,
-                    n_scrolls,
-                    up_res.name,
-                )
-                self._increment_scroll_cycle()
-                return up_res
+        # ====================================================
+        # PHASE 3: END OF CYCLE
+        # ====================================================
+        print(f"Cycle Complete. Waiting {self.config.CYCLE_PAUSE_DURATION}s...")
+        time.sleep(self.config.CYCLE_PAUSE_DURATION)
+        
+        # Final check during pause
+        target_state = self.check_for_red_icon()
+        if target_state:
+            # Still increment for next time as the current cycle was finished
+            self.current_scroll_count += self.config.SCROLL_INCREMENT_STEP
+            if self.current_scroll_count > self.config.MAX_SCROLL_CYCLES:
+                self.current_scroll_count = 1
+            return target_state
 
-            probe_wait = interval_pause if interval_pause > 0 else 0.001
-            wait_res = self._sleep_with_search_interrupt(probe_wait)
-            if wait_res:
-                logger.info(
-                    "Interrupt detected during UP interval %s/%s wait: %s",
-                    interval_index,
-                    n_scrolls,
-                    wait_res.name,
-                )
-                self._increment_scroll_cycle()
-                return wait_res
-
-        logger.info("DEBUG: Phase 1 complete. Starting Phase 2 (Return/Down)...")
-        logger.info("PHASE 2: Performing %s sequential scrolls DOWN", n_scrolls)
-        for interval_index in range(1, n_scrolls + 1):
-            down_res = self._scroll_and_scan_for_red_icons(
-                "down",
-                config.SCROLL_DURATION,
-                distance_ratio=1.0,
-            )
-            if down_res:
-                logger.info(
-                    "Interrupt detected after DOWN interval %s/%s: %s",
-                    interval_index,
-                    n_scrolls,
-                    down_res.name,
-                )
-                self._increment_scroll_cycle()
-                return down_res
-
-            probe_wait = interval_pause if interval_pause > 0 else 0.001
-            wait_res = self._sleep_with_search_interrupt(probe_wait)
-            if wait_res:
-                logger.info(
-                    "Interrupt detected during DOWN interval %s/%s wait: %s",
-                    interval_index,
-                    n_scrolls,
-                    wait_res.name,
-                )
-                self._increment_scroll_cycle()
-                return wait_res
-
-        logger.info("Cycle complete. Waiting for settle...")
-        wait_res = self._sleep_with_search_interrupt(config.SEARCH_CYCLE_WAIT)
-        self._increment_scroll_cycle()
-        if wait_res:
-            return wait_res
+        # Increment for next time (Arithmetic Progression)
+        previous_count = self.current_scroll_count
+        self.current_scroll_count += self.config.SCROLL_INCREMENT_STEP
+        print(f"DEBUG: Incrementing count from {previous_count} to {self.current_scroll_count}")
+        
+        # Boundary Check
+        if self.current_scroll_count > self.config.MAX_SCROLL_CYCLES:
+            print(f"Max cycles ({self.config.MAX_SCROLL_CYCLES}) reached. Resetting to 1.")
+            self.current_scroll_count = 1
+            
         return State.FIND_RED_ICONS
 
 
@@ -2118,6 +2149,8 @@ class EatventureBot:
         self._red_template_priority = []
         self._red_template_last_seen = {}
         self._recent_red_icon_history = []
+        logger.debug("wipe_memory: Resetting current_scroll_count to 1")
+        self.current_scroll_count = 1
         self.scroll_offset_units = 0
         
         # Apply the defaults back to mouse controller
@@ -2218,8 +2251,7 @@ class EatventureBot:
             logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
-            # Reset oscillation cycle after positive target acquisition so the
-            # next search pass starts from a tight scan window.
+            # Removed: reset oscillation cycle here to allow persistence
             self.work_done = True
             return State.CLICK_RED_ICON
     
@@ -2706,6 +2738,8 @@ class EatventureBot:
         self.current_level_start_time = datetime.now()
         self.completion_detected_time = None
         self.completion_detected_by = None
+        logger.debug("_finalize_transition: Resetting current_scroll_count to 1")
+        self.current_scroll_count = 1
         self.scroll_offset_units = 0
 
         self.telegram.notify_new_level(self.total_levels_completed, time_spent)
