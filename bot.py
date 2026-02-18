@@ -2149,9 +2149,7 @@ class EatventureBot:
         self._red_template_priority = []
         self._red_template_last_seen = {}
         self._recent_red_icon_history = []
-        logger.debug("wipe_memory: Resetting current_scroll_count to 1")
-        self.current_scroll_count = 1
-        self.scroll_offset_units = 0
+        self._reset_search_cycle(reason="wipe_memory")
         
         # Apply the defaults back to mouse controller
         self._apply_tuning()
@@ -2738,9 +2736,7 @@ class EatventureBot:
         self.current_level_start_time = datetime.now()
         self.completion_detected_time = None
         self.completion_detected_by = None
-        logger.debug("_finalize_transition: Resetting current_scroll_count to 1")
-        self.current_scroll_count = 1
-        self.scroll_offset_units = 0
+        self._reset_search_cycle(reason="level transition")
 
         self.telegram.notify_new_level(self.total_levels_completed, time_spent)
         self.historical_learner.record_completion(
@@ -2751,6 +2747,17 @@ class EatventureBot:
         logger.info(f"Level {self.total_levels_completed} completed. Time spent: {time_spent:.1f}s")
         logger.info("Waiting for unlock button after level transition")
         return State.WAIT_FOR_UNLOCK
+
+    def _reset_search_cycle(self, reason="state reset"):
+        """Reset oscillating-search progression so the next search starts from base sweep."""
+        logger.debug(
+            "Resetting search cycle (%s): current_scroll_count=%s, scroll_offset_units=%.2f",
+            reason,
+            self.current_scroll_count,
+            self.scroll_offset_units,
+        )
+        self.current_scroll_count = 1
+        self.scroll_offset_units = 0
     
     def handle_wait_for_unlock(self, current_state):
         self._click_idle()
