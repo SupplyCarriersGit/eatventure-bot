@@ -1149,7 +1149,8 @@ class EatventureBot:
             for conf, x, y in icons:
                 abs_x = x + x_min
                 abs_y = y + y_min
-                if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
+                passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
+                if not passed_color_gate:
                     continue
                 self._merge_detection(
                     detections,
@@ -1165,7 +1166,7 @@ class EatventureBot:
         best_match = None
         for (x, y), matches in detections.items():
             if len(matches) >= min_matches:
-                max_conf = max(conf for _, conf in matches)
+                max_conf = max(conf for _, conf, _ in matches)
                 if best_match is None or max_conf > best_match[1]:
                     best_match = (True, max_conf, x, y)
 
@@ -1284,7 +1285,8 @@ class EatventureBot:
                 for conf, x, y in icons:
                     abs_x = x + x_min
                     abs_y = y + y_min
-                    if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
+                    passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
+                    if not passed_color_gate:
                         continue
                     best_confidence = max(best_confidence, conf)
                     template_hits[template_name] = template_hits.get(template_name, 0) + 1
@@ -1384,7 +1386,8 @@ class EatventureBot:
                 continue
             abs_x = rx + x1
             abs_y = ry + y1
-            if not self._passes_red_color_gate(screenshot, abs_x, abs_y):
+            passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
+            if not passed_color_gate:
                 continue
             if best_match is None or confidence > best_match[2]:
                 best_match = (abs_x, abs_y, confidence)
