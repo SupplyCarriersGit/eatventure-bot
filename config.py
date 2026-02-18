@@ -105,9 +105,9 @@ SCROLL_DISTANCE_RATIO = 1  # Default multiplier for non-incremental scrolls
 
 # Continuous Incremental Oscillating Search settings
 MAX_SCROLL_CYCLES = 20  # Maximum widening steps before resetting to cycle 1
-SCROLL_STEP_MULTIPLIER = 1  # How many pixel steps to increment per cycle
-SCROLL_INTERVAL_WAIT = 0.5  # Time to wait between individual scroll steps
-SEARCH_CYCLE_WAIT = 0.5  # Time to wait after a full oscillation sequence
+SCROLL_INCREMENT_STEP = 2  # Arithmetic progression increment
+SCROLL_INTERVAL_PAUSE = 0.5  # Time to wait between individual scroll steps
+CYCLE_PAUSE_DURATION = 2.0  # Time to wait after a full oscillation sequence
 
 # Visual smoothness and stability
 SCROLL_DURATION = 0.6  # How long each drag action takes
