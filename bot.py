@@ -626,13 +626,15 @@ class EatventureBot:
         self.cycle_counter = 0
         self.red_icon_processed_count = 0
         self.forbidden_icon_scrolls = 0
-        self.scroll_cycle_counter = 1
+        self.search_attempt_counter = 1
+        self.scroll_offset_units = 0  # Tracks vertical drift from center
         
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
         self.consecutive_failed_cycles = 0
         
         self.total_levels_completed = 0
+        self._last_transition_time = 0.0
         self.current_level_start_time = None
         self.completion_detected_time = None
         self.completion_detected_by = None
@@ -705,16 +707,27 @@ class EatventureBot:
         return interrupt
 
     def _should_ignore_new_level_signal(self, source, state=None):
-        if source != "new level red icon":
-            return False
+        # Ignore ALL new level signals (icons and buttons) during critical phases.
+        # This prevents the bot from jumping back to TRANSITION_LEVEL while 
+        # it is already waiting for the new level to settle.
         active_state = state or self.state_machine.get_state()
         critical_states = (
             State.WAIT_FOR_UNLOCK,
+            State.TRANSITION_LEVEL,
+            State.CHECK_NEW_LEVEL,
             State.CHECK_UNLOCK,
             State.SEARCH_UPGRADE_STATION,
             State.HOLD_UPGRADE_STATION,
         )
-        return active_state in critical_states
+        if active_state in critical_states:
+            return True
+            
+        # Also enforce a hard cooldown after a transition to handle game lag/echoes
+        if source == "new level button" or source == "new level red icon":
+            if time.monotonic() - self._last_transition_time < 30.0:
+                return True
+                
+        return False
 
     def _monitor_new_level(self):
         interval = config.NEW_LEVEL_MONITOR_INTERVAL
@@ -958,11 +971,11 @@ class EatventureBot:
 
         interval = config.NEW_LEVEL_INTERRUPT_INTERVAL
         if interval <= 0:
-            time.sleep(target_time - now)
+            time.sleep(max(0, target_time - now))
             return False
 
         while now < target_time:
-            remaining = target_time - now
+            remaining = max(0, target_time - now)
             time.sleep(min(interval, remaining))
             if self._new_level_event.is_set():
                 interrupt = self._new_level_interrupt
@@ -980,6 +993,43 @@ class EatventureBot:
         if duration <= 0:
             return False
         return self._sleep_until(time.monotonic() + duration)
+
+    def _sleep_with_search_interrupt(self, duration):
+        """
+        Pauses for the specified duration but checks for Red Icons and Level Transitions.
+        Returns a State if an interrupt is detected, otherwise None.
+        """
+        if duration <= 0:
+            return None
+            
+        target_time = time.monotonic() + duration
+        interval = max(0.01, config.NEW_LEVEL_INTERRUPT_INTERVAL)
+        
+        while time.monotonic() < target_time:
+            # 1. Check for Level Transition (High Priority)
+            if self._should_interrupt_for_new_level(force=True):
+                return State.TRANSITION_LEVEL
+                
+            # 2. Check for Red Icons
+            screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+            red_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
+            if red_icons:
+                filtered, _ = self._filter_forbidden_red_icons(red_icons)
+                if filtered:
+                    self.red_icons = self._prioritize_red_icons(filtered)
+                    self.current_red_icon_index = 0
+                    self.work_done = True
+                    return State.CLICK_RED_ICON
+            
+            # 3. Check for Fallback Assets (Upgrade Station, Boxes)
+            clicked = self._scan_and_click_non_red_assets(screenshot)
+            if clicked > 0:
+                # We clicked something, need to re-evaluate state
+                return State.FIND_RED_ICONS
+
+            time.sleep(min(interval, max(0, target_time - time.monotonic())))
+            
+        return None
 
     def _detect_new_level(self, screenshot=None, max_y=None, force=False):
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
@@ -1330,7 +1380,7 @@ class EatventureBot:
         )
         return refined_pos, refined
 
-    def _detect_red_icons_in_view(self, screenshot, max_y=None, min_distance=80, threshold_override=None, min_matches_override=None):
+    def _detect_red_icons_in_view(self, screenshot, max_y=None, min_distance=80, threshold_override=None, min_matches_override=None, relaxed_color=False):
         if not self.available_red_icon_templates:
             return []
 
@@ -1357,7 +1407,7 @@ class EatventureBot:
             )
 
             for conf, x, y in icons:
-                if not self._passes_red_color_gate(screenshot, x, y):
+                if not self._passes_red_color_gate(screenshot, x, y, relaxed=relaxed_color):
                     continue
                 self._merge_detection(
                     detections,
@@ -1379,7 +1429,7 @@ class EatventureBot:
                 red_icons.append((max_conf, x, y))
         return red_icons
 
-    def _is_red_icon_present_at(self, x, y, screenshot=None):
+    def _is_red_icon_present_at(self, x, y, screenshot=None, threshold_override=None):
         if not self.available_red_icon_templates:
             return False
 
@@ -1396,11 +1446,14 @@ class EatventureBot:
             ):
                 return False
 
-        threshold = (
-            self.vision_optimizer.red_icon_threshold
-            if self.vision_optimizer.enabled
-            else config.RED_ICON_THRESHOLD
-        )
+        if threshold_override is not None:
+            threshold = threshold_override
+        else:
+            threshold = (
+                self.vision_optimizer.red_icon_threshold
+                if self.vision_optimizer.enabled
+                else config.RED_ICON_THRESHOLD
+            )
 
         padding = config.RED_ICON_VERIFY_PADDING
         x1 = max(0, x - padding)
@@ -1433,16 +1486,25 @@ class EatventureBot:
 
         return False
 
-    def _passes_red_color_gate(self, screenshot, x, y):
+    def _passes_red_color_gate(self, screenshot, x, y, relaxed=False):
         if not config.RED_ICON_COLOR_CHECK:
             return True
+            
+        min_ratio = config.RED_ICON_COLOR_MIN_RATIO
+        min_mean = config.RED_ICON_COLOR_MIN_MEAN
+        
+        if relaxed:
+            # Lower the requirements by approx 10-15% during motion
+            min_ratio = max(1.01, min_ratio - 0.10)
+            min_mean = max(10, min_mean - 10)
+            
         return self.image_matcher.is_red_dominant(
             screenshot,
             x,
             y,
             size=config.RED_ICON_COLOR_SAMPLE_SIZE,
-            min_ratio=config.RED_ICON_COLOR_MIN_RATIO,
-            min_mean=config.RED_ICON_COLOR_MIN_MEAN,
+            min_ratio=min_ratio,
+            min_mean=min_mean,
         )
 
     def _filter_forbidden_red_icons(self, red_icons):
@@ -1536,7 +1598,7 @@ class EatventureBot:
         state_holder = {"state": None}
 
         def _interrupt_to_main_cycle(new_state, reason):
-            logger.info("%s during scroll; tracking for return but continuing scroll segments", reason)
+            logger.info("%s during scroll; interrupting movement segments", reason)
             # Prioritize states: TRANSITION > ASSET_CHECK > CLICK_RED_ICON
             priority = {
                 State.TRANSITION_LEVEL: 10,
@@ -1549,14 +1611,43 @@ class EatventureBot:
             new_priority = priority.get(new_state, 0)
             if new_priority > current_priority:
                 state_holder["state"] = new_state
+            
+            # IMMEDIATE ACTION: Stop movement
+            stop_event.set()
 
         def _detect_interrupt_assets(screenshot):
+            # 1. First, check for Red Icons using the specialized robust detector
+            # Use a slightly more relaxed threshold for background monitoring
+            scroll_threshold = max(
+                0.0,
+                (self.vision_optimizer.red_icon_threshold if self.vision_optimizer.enabled else config.RED_ICON_THRESHOLD)
+                - float(getattr(config, "SCROLL_RED_ICON_THRESHOLD_DROP", 0.04)),
+            )
+            scroll_icons = self._detect_red_icons_in_view(
+                screenshot,
+                max_y=config.MAX_SEARCH_Y,
+                min_distance=max(8, int(getattr(config, "SCROLL_RED_ICON_MIN_DISTANCE", 20))),
+                threshold_override=scroll_threshold,
+                min_matches_override=max(1, int(getattr(config, "SCROLL_RED_ICON_MIN_MATCHES", 1))),
+                relaxed_color=True,
+            )
+            
+            if scroll_icons:
+                filtered_icons, _ = self._filter_forbidden_red_icons(scroll_icons)
+                if filtered_icons:
+                    return "RedIcon-group", filtered_icons[0][0], State.CLICK_RED_ICON
+
+            # 2. Check for other UI assets (unlock, upgradeStation, boxes)
             threshold = max(0.0, min(1.0, float(getattr(config, "SCROLL_INTERRUPT_ASSET_THRESHOLD", 0.93))))
             asset_state_map = {
                 "unlock": State.CHECK_UNLOCK,
                 "upgradeStation": State.SEARCH_UPGRADE_STATION,
             }
+            # Only loop over non-red templates in the standard way
             for asset_name in getattr(config, "SCROLL_INTERRUPT_ASSET_TEMPLATES", ()):
+                if asset_name.startswith("RedIcon"):
+                    continue
+                    
                 template_data = self.templates.get(asset_name)
                 if not template_data:
                     continue
@@ -1615,6 +1706,7 @@ class EatventureBot:
         segments = self._build_scroll_segments(direction, distance_ratio=distance_ratio)
         segment_duration = max(0.001, scroll_duration / max(1, len(segments)))
         segment_settle_delay = max(0.0, float(getattr(config, "SCROLL_SEGMENT_SETTLE_DELAY", 0.0)))
+        min_step_interval = max(0.001, float(getattr(config, "SCROLL_MIN_INTERVAL", 0.005)))
 
         # Start with a mouse down at the beginning of the scroll
         if segments:
@@ -1623,17 +1715,17 @@ class EatventureBot:
                 _interrupt_to_main_cycle(State.TRANSITION_LEVEL, "Failed to start steady drag")
                 return state_holder["state"]
 
+        # Track actually completed segments for accurate drift tracking
+        completed_segments = 0
         for i, (from_x, from_y, to_x, to_y) in enumerate(segments):
-            # Continue even if state_holder["state"] is set, unless it's a level transition
-            if self._new_level_event.is_set():
+            if stop_event.is_set() or self._new_level_event.is_set():
                 break
             
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-            min_step_interval = max(0.001, float(getattr(config, "SCROLL_MIN_INTERVAL", 0.005)))
             step_duration = max(min_step_interval, segment_duration / steps)
             
             for step in range(1, steps + 1):
-                if self._new_level_event.is_set():
+                if stop_event.is_set() or self._new_level_event.is_set():
                     break
                 
                 t = step / steps
@@ -1642,6 +1734,8 @@ class EatventureBot:
                 
                 self.mouse_controller.move_to(curr_x, curr_y, relative=True)
                 time.sleep(step_duration)
+
+            completed_segments += 1
 
             if segment_settle_delay > 0:
                 if self._sleep_with_interrupt(segment_settle_delay):
@@ -1667,8 +1761,6 @@ class EatventureBot:
                 
                 if scroll_icons:
                     filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(scroll_icons)
-                    if forbidden_zone_count > 0:
-                        logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed during scroll")
                     if filtered_icons:
                         self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in scroll_icons])
                         self.red_icons = self._prioritize_red_icons(filtered_icons)
@@ -1681,9 +1773,18 @@ class EatventureBot:
 
         # Always release the mouse button at the end of the scroll sequence
         if segments:
-            _, _, final_to_x, final_to_y = segments[-1]
-            # Use the last position reached if interrupted
+            # We use the actual last segment index reached
+            _, _, final_to_x, final_to_y = segments[max(0, completed_segments - 1)]
             self.mouse_controller.mouse_up(final_to_x, final_to_y, relative=True)
+            
+            # Update physical position tracker (Drift tracking) with ACTUAL distance
+            # Calculate ratio of distance moved relative to full distance_ratio
+            actual_move_ratio = (completed_segments / len(segments)) * float(distance_ratio if distance_ratio is not None else 1.0)
+            if direction == "up":
+                self.scroll_offset_units += actual_move_ratio
+            else:
+                self.scroll_offset_units -= actual_move_ratio
+            logger.debug(f"Current scroll drift: {self.scroll_offset_units:.2f} units from center")
 
         stop_event.set()
         monitor_thread.join(timeout=0.2)
@@ -1701,6 +1802,9 @@ class EatventureBot:
             scan_for_red_icons=True,
             distance_ratio=distance_ratio,
         )
+        
+        # If we already found a target during the scroll segments, 
+        # DO NOT overwrite it with a post-scroll scan which might miss.
         if interrupt_state is not None:
             return interrupt_state
 
@@ -1714,7 +1818,7 @@ class EatventureBot:
         ):
             return State.TRANSITION_LEVEL
 
-        red_icons = self._detect_red_icons_in_view(limited_screenshot, max_y=config.MAX_SEARCH_Y)
+        red_icons = self._detect_red_icons_in_view(limited_screenshot, max_y=config.MAX_SEARCH_Y, relaxed_color=True)
         red_icons = self._stable_red_icons(red_icons)
         self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in red_icons])
         if not red_icons:
@@ -1735,84 +1839,89 @@ class EatventureBot:
         return State.CLICK_RED_ICON
 
     
+    def _increment_scroll_cycle(self):
+        """
+        Increments the search cycle counter and handles the MAX_SCROLL_CYCLES reset.
+        """
+        old_val = self.search_attempt_counter
+        self.search_attempt_counter += 1
+        if self.search_attempt_counter > config.MAX_SCROLL_CYCLES:
+            logger.info(f"Max search cycles ({config.MAX_SCROLL_CYCLES}) reached. Resetting to Cycle 1.")
+            self.search_attempt_counter = 1
+        logger.debug(f"Search cycle incremented: {old_val} -> {self.search_attempt_counter}")
+
     def execute_oscillating_search(self):
         """
-        Implements Continuous Incremental Oscillating Search using a Persistent State Counter.
-        This function performs MULTIPLE standard scrolls (repetition) per cycle.
+        Implements Continuous Incremental Oscillating Search with Mirror Protocol.
+        Phase 1: UP N scrolls.
+        Phase 2: DOWN N scrolls (Return to center).
         """
-        # 1. CALCULATE MULTIPLIER based on persistent counter
-        # widening_multiplier is the number of REPETITIONS of the standard SCROLL_PIXEL_STEP
-        widening_multiplier = self.scroll_cycle_counter * config.SCROLL_STEP_MULTIPLIER
+        # Define repetition count for this cycle (n_scrolls)
+        n_scrolls = self.search_attempt_counter * config.SCROLL_STEP_MULTIPLIER
         
-        logger.info(f"DEBUG: Starting Cycle {self.scroll_cycle_counter} (Repetitions: {widening_multiplier})")
+        logger.info(f"DEBUG: Starting Search Cycle {self.search_attempt_counter} (Intervals: {n_scrolls})")
 
-        def _interrupt_priority(state):
-            if state is None:
-                return -1
-            priority_order = {
-                State.TRANSITION_LEVEL: 100,
-                State.CHECK_NEW_LEVEL: 90,
-                State.WAIT_FOR_UNLOCK: 80,
-                State.CLICK_RED_ICON: 10,
-            }
-            return priority_order.get(state, 50)
-
-        def _merge_interrupt_state(current_pending, new_state):
-            if new_state is None:
-                return current_pending
-            if current_pending is None:
-                return new_state
-            if _interrupt_priority(new_state) > _interrupt_priority(current_pending):
-                return new_state
-            return current_pending
-
-        pending_state = None
-        settle_delay = max(0.05, getattr(config, "SCROLL_SETTLE_DELAY", 0.15))
-
-        # 2. PERFORM THE SEARCH (The "Peek" UP - Multiple standard scrolls)
-        logger.info(f"Incremental Search: Performing {widening_multiplier} sequential scrolls UP")
-        for i in range(widening_multiplier):
-            # Each call correctly starts at SCROLL_START_POS
+        # ---------------------------------------------------------
+        # PHASE 1: THE CLIMB (UP)
+        # ---------------------------------------------------------
+        logger.info(f"PHASE 1: Performing {n_scrolls} sequential scrolls UP")
+        for i in range(n_scrolls):
             res = self._scroll_and_scan_for_red_icons(
                 "up",
                 config.SCROLL_DURATION,
                 distance_ratio=1.0
             )
-            pending_state = _merge_interrupt_state(pending_state, res)
             
-            # Pause after every single scroll action for stability
-            time.sleep(config.SCROLL_INTERVAL_WAIT)
+            if res:
+                logger.info(f"Interrupt detected during UP phase: {res.name}. Breaking search loop.")
+                self._increment_scroll_cycle()
+                return res
+                
+            # Pause between individual scrolls
+            wait_res = self._sleep_with_search_interrupt(config.SCROLL_INTERVAL_WAIT)
+            if wait_res:
+                logger.info(f"Interrupt detected during UP interval: {wait_res.name}. Breaking search loop.")
+                self._increment_scroll_cycle()
+                return wait_res
 
-        # 3. RETURN TO CENTER (Crucial Step - DOWN - Multiple standard scrolls)
-        logger.info(f"Incremental Search: Performing {widening_multiplier} sequential scrolls DOWN (Return to Center)")
-        for i in range(widening_multiplier):
-            # Each call correctly starts at SCROLL_START_POS
+        # ---------------------------------------------------------
+        # PHASE 2: THE RETURN (DOWN) - MANDATORY EXECUTION
+        # ---------------------------------------------------------
+        # This debug statement confirms we finished Phase 1 without interrupts
+        logger.info("DEBUG: Phase 1 complete. Starting Phase 2 (Return/Down)...")
+        print("DEBUG: Phase 1 complete. Starting Phase 2 (Return/Down)...")
+
+        logger.info(f"PHASE 2: Performing {n_scrolls} sequential scrolls DOWN (Return to Center)")
+        for i in range(n_scrolls):
             res = self._scroll_and_scan_for_red_icons(
                 "down",
                 config.SCROLL_DURATION,
                 distance_ratio=1.0
             )
-            pending_state = _merge_interrupt_state(pending_state, res)
             
-            # Pause after every single scroll action for stability
-            time.sleep(config.SCROLL_INTERVAL_WAIT)
+            if res:
+                logger.info(f"Interrupt detected during DOWN phase: {res.name}. Breaking search loop.")
+                self._increment_scroll_cycle()
+                return res
+                
+            # Pause between individual scrolls
+            wait_res = self._sleep_with_search_interrupt(config.SCROLL_INTERVAL_WAIT)
+            if wait_res:
+                logger.info(f"Interrupt detected during DOWN interval: {wait_res.name}. Breaking search loop.")
+                self._increment_scroll_cycle()
+                return wait_res
 
-        # Pause to let the game "settle" before calculating the next search cycle
+        # ---------------------------------------------------------
+        # PHASE 3: CYCLE MANAGEMENT
+        # ---------------------------------------------------------
+        # Settle wait after full oscillation
         logger.info("Cycle complete. Waiting for settle...")
-        time.sleep(config.SEARCH_CYCLE_WAIT)
+        wait_res = self._sleep_with_search_interrupt(config.SEARCH_CYCLE_WAIT)
+        if wait_res:
+            self._increment_scroll_cycle()
+            return wait_res
 
-        # 4. INCREMENT THE COUNTER (Persist for NEXT time)
-        self.scroll_cycle_counter += 1
-        
-        # 5. CHECK RESET CONDITION
-        if self.scroll_cycle_counter > config.MAX_SCROLL_CYCLES:
-            logger.info(f"Max cycles ({config.MAX_SCROLL_CYCLES}) reached. Resetting to 1.")
-            self.scroll_cycle_counter = 1
-
-        if pending_state:
-            logger.info(f"Interrupt state ({pending_state.name}) found during multi-scroll sequence. Action triggered.")
-            return pending_state
-
+        self._increment_scroll_cycle()
         return State.FIND_RED_ICONS
 
     def load_templates(self):
@@ -2004,7 +2113,9 @@ class EatventureBot:
         self._red_template_priority = []
         self._red_template_last_seen = {}
         self._recent_red_icon_history = []
-        self.scroll_cycle_counter = 1
+        logger.debug("wipe_memory: Resetting search_attempt_counter to 1")
+        self.search_attempt_counter = 1
+        self.scroll_offset_units = 0
         
         # Apply the defaults back to mouse controller
         self._apply_tuning()
@@ -2104,6 +2215,7 @@ class EatventureBot:
             logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
+            self.search_attempt_counter = 1
             self.work_done = True
             return State.CLICK_RED_ICON
     
@@ -2114,7 +2226,16 @@ class EatventureBot:
         
         confidence, x, y = self.red_icons[self.current_red_icon_index]
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
-        if not self._is_red_icon_present_at(x, y, screenshot=limited_screenshot):
+        
+        # Calculate relaxed threshold for verification (matching search cycle logic)
+        base_threshold = (
+            self.vision_optimizer.red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.RED_ICON_THRESHOLD
+        )
+        relaxed_threshold = max(0.0, base_threshold - 0.04) # Match SCROLL_RED_ICON_THRESHOLD_DROP approx
+        
+        if not self._is_red_icon_present_at(x, y, screenshot=limited_screenshot, threshold_override=relaxed_threshold):
             logger.info(
                 "Red icon no longer present at (%s, %s); skipping click",
                 x,
@@ -2298,61 +2419,21 @@ class EatventureBot:
                 return State.CLICK_RED_ICON
             return State.OPEN_BOXES
         
-        logger.info("Holding upgrade station click...")
+        logger.info("Holding upgrade station click (Exempt from interrupts)...")
 
-        max_hold_time = config.UPGRADE_HOLD_DURATION
-        check_interval = max(config.UPGRADE_CHECK_INTERVAL, self.tuner.search_interval)
+        # Define interrupt check for hold_at (Disabled for exemption)
+        def check_interrupts():
+            return False
+
         start_time = time.monotonic()
-        end_time = start_time + max_hold_time
-        upgrade_missing_logged = False
-        next_check_time = start_time + check_interval
-        interrupt_state = None
-
-        if not self.mouse_controller.mouse_down(x, y, relative=True):
-            self.red_icon_processed_count += 1
-            self.current_red_icon_index += 1
-            if self.current_red_icon_index < len(self.red_icons):
-                return State.CLICK_RED_ICON
-            return State.OPEN_BOXES
-
-        try:
-            while True:
-                now = time.monotonic()
-                if now >= end_time:
-                    break
-
-                if now >= next_check_time:
-                    limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
-
-                    if "upgradeStation" in self.templates:
-                        template, mask = self.templates["upgradeStation"]
-                        found, confidence, found_x, found_y = self.image_matcher.find_template(
-                            limited_screenshot, template, mask=mask,
-                            threshold=hold_threshold, template_name="upgradeStation",
-                            check_color=config.UPGRADE_STATION_COLOR_CHECK
-                        )
-
-                        if not found and not upgrade_missing_logged:
-                            logger.info("Upgrade station not found while holding; continuing until duration completes.")
-                            upgrade_missing_logged = True
-
-                    if self._should_interrupt_for_new_level(
-                        screenshot=limited_screenshot,
-                        max_y=config.MAX_SEARCH_Y,
-                        force=True,
-                    ):
-                        interrupt_state = State.TRANSITION_LEVEL
-                        break
-
-                    next_check_time = max(next_check_time + check_interval, now + check_interval)
-
-                now = time.monotonic()
-                next_action_time = min(next_check_time, end_time)
-                if self._sleep_until(next_action_time):
-                    interrupt_state = State.TRANSITION_LEVEL
-                    break
-        finally:
-            self.mouse_controller.mouse_up(x, y, relative=True)
+        
+        # Use the hold action - interrupts are now disabled via the callback
+        self.mouse_controller.hold_at(
+            x, y, 
+            duration=config.UPGRADE_HOLD_DURATION, 
+            relative=True, 
+            interrupt_check=check_interrupts
+        )
 
         elapsed_time = time.monotonic() - start_time
         logger.info(f"Clicking complete: hold duration {elapsed_time:.1f}s")
@@ -2366,22 +2447,13 @@ class EatventureBot:
         self.current_red_icon_index += 1
 
         logger.info("✓ Upgrade station complete → Stats upgrade next")
-        return interrupt_state or State.UPGRADE_STATS
+        return State.UPGRADE_STATS
     
     def handle_upgrade_stats(self, current_state):
-        logger.info("⬆ Stats upgrade starting")
+        logger.info("⬆ Stats upgrade starting (Exempt from interrupts)")
         self._click_idle()
         
         extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = extended_screenshot[:config.MAX_SEARCH_Y, :]
-
-        if self._should_interrupt_for_new_level(
-            screenshot=limited_screenshot,
-            max_y=config.MAX_SEARCH_Y,
-            force=True,
-        ):
-            logger.info("New level detected during stats upgrade, transitioning")
-            return State.TRANSITION_LEVEL
         
         has_stats_icon, stats_confidence = self._has_stats_upgrade_icon(extended_screenshot)
         if not has_stats_icon:
@@ -2393,34 +2465,28 @@ class EatventureBot:
         
         logger.info("✓ Stats icon found, upgrading")
         self.mouse_controller.click(config.STATS_UPGRADE_BUTTON_POS[0], config.STATS_UPGRADE_BUTTON_POS[1], relative=True)
-        if self._sleep_with_interrupt(config.STATE_DELAY):
-            return State.TRANSITION_LEVEL
+        # Use standard non-interruptible sleep
+        time.sleep(config.STATE_DELAY)
         
         start_time = time.monotonic()
-        last_new_level_check = 0.0
         next_click_time = start_time
         while time.monotonic() - start_time < config.STATS_UPGRADE_CLICK_DURATION:
-            if self._sleep_until(next_click_time):
-                return State.TRANSITION_LEVEL
             self.mouse_controller.click(
                 config.STATS_UPGRADE_POS[0],
                 config.STATS_UPGRADE_POS[1],
                 relative=True,
                 wait_after=False,
             )
+            
+            # Use standard non-interruptible sleep
+            sleep_duration = max(0, next_click_time + config.STATS_UPGRADE_CLICK_DELAY - time.monotonic())
+            if sleep_duration > 0:
+                time.sleep(sleep_duration)
+            
             next_click_time = max(
                 next_click_time + config.STATS_UPGRADE_CLICK_DELAY,
-                time.monotonic() + config.STATS_UPGRADE_CLICK_DELAY,
+                time.monotonic()
             )
-            elapsed = time.monotonic() - start_time
-            if elapsed - last_new_level_check >= config.NEW_LEVEL_INTERRUPT_INTERVAL:
-                limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-                if self._should_interrupt_for_new_level(
-                    screenshot=limited_screenshot,
-                    max_y=config.MAX_SEARCH_Y,
-                ):
-                    return State.TRANSITION_LEVEL
-                last_new_level_check = elapsed
         
         self._click_idle()
         logger.info("========== STAT UPGRADE COMPLETED ==========")
@@ -2500,6 +2566,24 @@ class EatventureBot:
     def handle_scroll(self, current_state):
         self._click_idle()
         
+        # 1. DRIFT CORRECTION: If we are not at center (due to interrupt), return to center first.
+        # This ensures the IOS pattern always starts from a known reference point.
+        if abs(self.scroll_offset_units) > 0.01:
+            logger.info(f"Drift detected ({self.scroll_offset_units:.2f} units). Correcting to center before search.")
+            # If offset is positive (UP), we need to scroll DOWN
+            direction = "down" if self.scroll_offset_units > 0 else "up"
+            correction_dist = abs(self.scroll_offset_units)
+            
+            # Perform correction without standard search logic
+            self._scroll_with_background_asset_detection(
+                direction,
+                config.SCROLL_DURATION,
+                scan_for_red_icons=False,
+                distance_ratio=correction_dist
+            )
+            # Logic inside _scroll_with_background_asset_detection updates scroll_offset_units
+            return State.FIND_RED_ICONS
+
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
 
         if self._should_interrupt_for_new_level(
@@ -2607,6 +2691,7 @@ class EatventureBot:
 
     def _finalize_transition(self):
         self.total_levels_completed += 1
+        self._last_transition_time = time.monotonic()
 
         time_spent = 0
         if self.current_level_start_time:
@@ -2617,7 +2702,9 @@ class EatventureBot:
         self.current_level_start_time = datetime.now()
         self.completion_detected_time = None
         self.completion_detected_by = None
-        self.scroll_cycle_counter = 1
+        logger.debug("_finalize_transition: Resetting search_attempt_counter to 1")
+        self.search_attempt_counter = 1
+        self.scroll_offset_units = 0
 
         self.telegram.notify_new_level(self.total_levels_completed, time_spent)
         self.historical_learner.record_completion(

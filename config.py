@@ -34,7 +34,7 @@ MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.94
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95
 STATS_RED_ICON_THRESHOLD = 0.97
-UPGRADE_STATION_THRESHOLD = 0.95
+UPGRADE_STATION_THRESHOLD = 0.85
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.95
 NEW_LEVEL_THRESHOLD = 0.98
@@ -100,11 +100,11 @@ MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.0015
 SCROLL_START_POS = (180, 390)
 
 # Distance in pixels for a single "standard" scroll step
-SCROLL_PIXEL_STEP = 200
-SCROLL_DISTANCE_RATIO = 0.8  # Default multiplier for non-incremental scrolls
+SCROLL_PIXEL_STEP = 150
+SCROLL_DISTANCE_RATIO = 1  # Default multiplier for non-incremental scrolls
 
 # Continuous Incremental Oscillating Search settings
-MAX_SCROLL_CYCLES = 15  # Maximum widening steps before resetting to cycle 1
+MAX_SCROLL_CYCLES = 20  # Maximum widening steps before resetting to cycle 1
 SCROLL_STEP_MULTIPLIER = 1  # How many pixel steps to increment per cycle
 SCROLL_INTERVAL_WAIT = 0.5  # Time to wait between individual scroll steps
 SEARCH_CYCLE_WAIT = 0.5  # Time to wait after a full oscillation sequence
@@ -116,7 +116,7 @@ SCROLL_MIN_INTERVAL = 0.005  # Throttle between consecutive drag steps
 SCROLL_SETTLE_DELAY = 0.15  # Wait time after a scroll for UI to stop moving
 SCROLL_SEGMENTS = 1
 SCROLL_MIN_SEGMENT_DISTANCE = 20
-SCROLL_SEGMENT_SETTLE_DELAY = 0.0
+SCROLL_SEGMENT_SETTLE_DELAY = 0.05  # Short pause before scanning during a multi-segment scroll
 SCROLL_ASSET_SCAN_INTERVAL = 0.005  # Frequency of background asset scans during scroll
 
 # Scroll detection settings
@@ -164,7 +164,7 @@ STATS_UPGRADE_BUTTON_POS = (310, 698)
 NEW_LEVEL_BUTTON_POS = (30, 692)
 
 # Timing for interaction sequences
-UPGRADE_HOLD_DURATION = 8.75  # How long to hold the upgrade button
+UPGRADE_HOLD_DURATION = 5  # How long to hold the upgrade button
 UPGRADE_CLICK_INTERVAL = 0.008
 UPGRADE_SEARCH_INTERVAL = 0.02
 UPGRADE_CHECK_INTERVAL = 0.045
