@@ -1856,72 +1856,62 @@ class EatventureBot:
         Phase 1: UP N scrolls.
         Phase 2: DOWN N scrolls (Return to center).
         """
-        # Define repetition count for this cycle (n_scrolls)
-        n_scrolls = self.search_attempt_counter * config.SCROLL_STEP_MULTIPLIER
-        
-        logger.info(f"DEBUG: Starting Search Cycle {self.search_attempt_counter} (Intervals: {n_scrolls})")
+        cycle = self.search_attempt_counter
+        n_scrolls = cycle * config.SCROLL_STEP_MULTIPLIER
+        logger.info("DEBUG: Starting Search Cycle %s (Intervals: %s)", cycle, n_scrolls)
 
-        # ---------------------------------------------------------
-        # PHASE 1: THE CLIMB (UP)
-        # ---------------------------------------------------------
-        logger.info(f"PHASE 1: Performing {n_scrolls} sequential scrolls UP")
-        for i in range(n_scrolls):
-            res = self._scroll_and_scan_for_red_icons(
-                "up",
-                config.SCROLL_DURATION,
-                distance_ratio=1.0
-            )
-            
-            if res:
-                logger.info(f"Interrupt detected during UP phase: {res.name}. Breaking search loop.")
-                self._increment_scroll_cycle()
-                return res
-                
-            # Pause between individual scrolls
-            wait_res = self._sleep_with_search_interrupt(config.SCROLL_INTERVAL_WAIT)
-            if wait_res:
-                logger.info(f"Interrupt detected during UP interval: {wait_res.name}. Breaking search loop.")
-                self._increment_scroll_cycle()
-                return wait_res
+        def _run_phase(direction):
+            logger.info("PHASE %s: Performing %s sequential scrolls %s", "1" if direction == "up" else "2", n_scrolls, direction.upper())
+            for interval_index in range(1, n_scrolls + 1):
+                # Detection pass 1: immediate post-scroll check.
+                res = self._scroll_and_scan_for_red_icons(
+                    direction,
+                    config.SCROLL_DURATION,
+                    distance_ratio=1.0,
+                )
+                if res:
+                    logger.info(
+                        "Interrupt detected after %s interval %s/%s: %s",
+                        direction.upper(),
+                        interval_index,
+                        n_scrolls,
+                        res.name,
+                    )
+                    return res
 
-        # ---------------------------------------------------------
-        # PHASE 2: THE RETURN (DOWN) - MANDATORY EXECUTION
-        # ---------------------------------------------------------
-        # This debug statement confirms we finished Phase 1 without interrupts
+                # Detection pass 2: interval-window check. When configured wait is zero,
+                # perform a single probe so every interval still gets checked.
+                interval_wait = config.SCROLL_INTERVAL_WAIT
+                probe_wait = interval_wait if interval_wait > 0 else 0.001
+                wait_res = self._sleep_with_search_interrupt(probe_wait)
+                if wait_res:
+                    logger.info(
+                        "Interrupt detected during %s interval %s/%s wait: %s",
+                        direction.upper(),
+                        interval_index,
+                        n_scrolls,
+                        wait_res.name,
+                    )
+                    return wait_res
+
+            return None
+
+        up_res = _run_phase("up")
+        if up_res:
+            self._increment_scroll_cycle()
+            return up_res
+
         logger.info("DEBUG: Phase 1 complete. Starting Phase 2 (Return/Down)...")
-        print("DEBUG: Phase 1 complete. Starting Phase 2 (Return/Down)...")
+        down_res = _run_phase("down")
+        if down_res:
+            self._increment_scroll_cycle()
+            return down_res
 
-        logger.info(f"PHASE 2: Performing {n_scrolls} sequential scrolls DOWN (Return to Center)")
-        for i in range(n_scrolls):
-            res = self._scroll_and_scan_for_red_icons(
-                "down",
-                config.SCROLL_DURATION,
-                distance_ratio=1.0
-            )
-            
-            if res:
-                logger.info(f"Interrupt detected during DOWN phase: {res.name}. Breaking search loop.")
-                self._increment_scroll_cycle()
-                return res
-                
-            # Pause between individual scrolls
-            wait_res = self._sleep_with_search_interrupt(config.SCROLL_INTERVAL_WAIT)
-            if wait_res:
-                logger.info(f"Interrupt detected during DOWN interval: {wait_res.name}. Breaking search loop.")
-                self._increment_scroll_cycle()
-                return wait_res
-
-        # ---------------------------------------------------------
-        # PHASE 3: CYCLE MANAGEMENT
-        # ---------------------------------------------------------
-        # Settle wait after full oscillation
         logger.info("Cycle complete. Waiting for settle...")
         wait_res = self._sleep_with_search_interrupt(config.SEARCH_CYCLE_WAIT)
-        if wait_res:
-            self._increment_scroll_cycle()
-            return wait_res
-
         self._increment_scroll_cycle()
+        if wait_res:
+            return wait_res
         return State.FIND_RED_ICONS
 
     def load_templates(self):
@@ -2215,6 +2205,8 @@ class EatventureBot:
             logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
+            # Reset oscillation cycle after positive target acquisition so the
+            # next search pass starts from a tight scan window.
             self.search_attempt_counter = 1
             self.work_done = True
             return State.CLICK_RED_ICON
