@@ -869,6 +869,7 @@ class EatventureBot:
         radius = max(4, int(getattr(config, "RED_ICON_STABILITY_RADIUS", 14)))
         min_hits = max(1, int(getattr(config, "RED_ICON_STABILITY_MIN_HITS", 2)))
         max_history = max(2, int(getattr(config, "RED_ICON_STABILITY_MAX_HISTORY", 10)))
+        immediate_threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50) * 1.5 # Super solid trigger
         now = time.monotonic()
 
         history = []
@@ -883,11 +884,17 @@ class EatventureBot:
         self._recent_red_icon_history = history
 
         stable = []
-        for conf, x, y in red_icons:
+        for conf, x, y, px_count in red_icons:
+            # Requirement: Pixel Density Trigger (Immediate success if high density)
+            if px_count >= immediate_threshold:
+                logger.debug(f"Immediate trigger: high pixel density ({px_count}) at ({x}, {y})")
+                stable.append((conf, x, y))
+                continue
+
             hits = 0
             best_conf = conf
             for entry in history:
-                for h_conf, hx, hy in entry["icons"]:
+                for h_conf, hx, hy, hpx in entry["icons"]:
                     if abs(hx - x) <= radius and abs(hy - y) <= radius:
                         hits += 1
                         if h_conf > best_conf:
@@ -1014,13 +1021,29 @@ class EatventureBot:
             # 2. Check for Red Icons
             screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
             red_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
+            
+            # Implementation: Immediate Trigger for high density
+            immediate_threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50) * 1.5
+            
             if red_icons:
                 filtered, _ = self._filter_forbidden_red_icons(red_icons)
                 if filtered:
-                    self.red_icons = self._prioritize_red_icons(filtered)
-                    self.current_red_icon_index = 0
-                    self.work_done = True
-                    return State.CLICK_RED_ICON
+                    # Check if any pass the 'immediate' threshold
+                    has_immediate = any(px >= immediate_threshold for *_, px in filtered)
+                    
+                    if has_immediate:
+                        self.red_icons = self._prioritize_red_icons(filtered)
+                        self.current_red_icon_index = 0
+                        self.work_done = True
+                        return State.CLICK_RED_ICON
+                    
+                    # Otherwise, use standard stability check (which requires 3+ hits)
+                    stable = self._stable_red_icons(filtered)
+                    if stable:
+                        self.red_icons = self._prioritize_red_icons(stable)
+                        self.current_red_icon_index = 0
+                        self.work_done = True
+                        return State.CLICK_RED_ICON
             
             # 3. Check for Fallback Assets (Upgrade Station, Boxes)
             clicked = self._scan_and_click_non_red_assets(screenshot)
@@ -1269,7 +1292,7 @@ class EatventureBot:
         self._update_red_template_priority(template_hits)
         return best_confidence > 0, best_confidence
 
-    def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=None, bucket_size=None):
+    def _merge_detection(self, detections, buckets, x, y, template_name, conf, proximity=None, bucket_size=None, pixel_count=0):
         prox = proximity if proximity is not None else config.RED_ICON_MERGE_PROXIMITY
         bsize = bucket_size if bucket_size is not None else config.RED_ICON_MERGE_BUCKET_SIZE
         bucket_x = x // bsize
@@ -1278,10 +1301,10 @@ class EatventureBot:
             for dy in (-1, 0, 1):
                 for px, py in buckets.get((bucket_x + dx, bucket_y + dy), []):
                     if abs(x - px) < prox and abs(y - py) < prox:
-                        detections[(px, py)].append((template_name, conf))
+                        detections[(px, py)].append((template_name, conf, pixel_count))
                         return
 
-        detections[(x, y)] = [(template_name, conf)]
+        detections[(x, y)] = [(template_name, conf, pixel_count)]
         buckets.setdefault((bucket_x, bucket_y), []).append((x, y))
 
     def _refine_template_position(
@@ -1408,7 +1431,8 @@ class EatventureBot:
             )
 
             for conf, x, y in icons:
-                if not self._passes_red_color_gate(screenshot, x, y, relaxed=relaxed_color):
+                passed, pixel_count = self._passes_red_color_gate(screenshot, x, y, relaxed=relaxed_color)
+                if not passed:
                     continue
                 self._merge_detection(
                     detections,
@@ -1417,6 +1441,7 @@ class EatventureBot:
                     y,
                     template_name,
                     conf,
+                    pixel_count=pixel_count
                 )
                 template_hits[template_name] = template_hits.get(template_name, 0) + 1
 
@@ -1426,8 +1451,9 @@ class EatventureBot:
         red_icons = []
         for (x, y), matches in detections.items():
             if len(matches) >= min_matches:
-                max_conf = max(conf for _, conf in matches)
-                red_icons.append((max_conf, x, y))
+                max_conf = max(conf for _, conf, _ in matches)
+                max_pixel_count = max(px for _, _, px in matches)
+                red_icons.append((max_conf, x, y, max_pixel_count))
         return red_icons
 
     def _is_red_icon_present_at(self, x, y, screenshot=None, threshold_override=None):
@@ -1437,14 +1463,13 @@ class EatventureBot:
         target_screenshot = screenshot if screenshot is not None else self._capture(max_y=config.MAX_SEARCH_Y)
 
         if config.RED_ICON_COLOR_CHECK:
-            if not self.image_matcher.is_red_dominant(
-                target_screenshot,
-                x,
-                y,
-                size=config.RED_ICON_COLOR_SAMPLE_SIZE,
-                min_ratio=config.RED_ICON_COLOR_MIN_RATIO,
-                min_mean=config.RED_ICON_COLOR_MIN_MEAN,
-            ):
+            show_mask = getattr(config, "DEBUG_VISION", False)
+            pixel_count = self.image_matcher.count_red_pixels(
+                target_screenshot, x, y,
+                size=getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24),
+                show_mask=show_mask
+            )
+            if pixel_count < getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50):
                 return False
 
         if threshold_override is not None:
@@ -1488,32 +1513,31 @@ class EatventureBot:
         return False
 
     def _passes_red_color_gate(self, screenshot, x, y, relaxed=False):
-        if not config.RED_ICON_COLOR_CHECK:
-            return True
-            
-        min_ratio = config.RED_ICON_COLOR_MIN_RATIO
-        min_mean = config.RED_ICON_COLOR_MIN_MEAN
-        
-        if relaxed:
-            # Lower the requirements by approx 10-15% during motion
-            min_ratio = max(1.01, min_ratio - 0.10)
-            min_mean = max(10, min_mean - 10)
-            
-        return self.image_matcher.is_red_dominant(
-            screenshot,
-            x,
-            y,
-            size=config.RED_ICON_COLOR_SAMPLE_SIZE,
-            min_ratio=min_ratio,
-            min_mean=min_mean,
+        """
+        Requirement: Pixel Density Trigger.
+        Counts red pixels in ROI after dilation.
+        Returns: (passed, pixel_count)
+        """
+        show_mask = getattr(config, "DEBUG_VISION", False)
+        pixel_count = self.image_matcher.count_red_pixels(
+            screenshot, x, y, 
+            size=getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24),
+            show_mask=show_mask
         )
+        
+        threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50)
+        if relaxed:
+            threshold = int(threshold * 0.7)
+            
+        return pixel_count >= threshold, pixel_count
 
     def _filter_forbidden_red_icons(self, red_icons):
         filtered_icons = []
         forbidden_zone_count = 0
         forbidden_zones = self.forbidden_zones
 
-        for conf, x, y in red_icons:
+        for icon in red_icons:
+            conf, x, y = icon[:3]
             in_forbidden = any(
                 zone_x_min <= x <= zone_x_max and zone_y_min <= y <= zone_y_max
                 for zone_x_min, zone_x_max, zone_y_min, zone_y_max in forbidden_zones
@@ -1522,13 +1546,13 @@ class EatventureBot:
             if in_forbidden:
                 forbidden_zone_count += 1
             else:
-                filtered_icons.append((conf, x, y))
+                filtered_icons.append(icon)
 
         return filtered_icons, forbidden_zone_count
 
     def _prioritize_red_icons(self, red_icons):
         def get_priority(icon):
-            conf, x, y = icon
+            conf, x, y = icon[:3]
             for success_y in self.successful_red_icon_positions:
                 if abs(y - success_y) < 50:
                     return (0, y)

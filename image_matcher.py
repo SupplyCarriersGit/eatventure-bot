@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import logging
 import os
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ class ImageMatcher:
         cv2.setNumThreads(cpu_count)
 
     def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
+        # ... existing logic ...
         half = max(1, size // 2)
         x1 = max(0, x - half)
         y1 = max(0, y - half)
@@ -30,6 +32,43 @@ class ImageMatcher:
 
         dominant_ratio = max(g, b) + 1e-6
         return (r / dominant_ratio) >= min_ratio
+
+    def count_red_pixels(self, image, x, y, size=24, show_mask=False):
+        """
+        Counts red pixels in a ROI using HSV masking and dilation.
+        Requirement: Morphological Dilation & Pixel Density Trigger.
+        """
+        half = max(1, size // 2)
+        x1 = max(0, x - half)
+        y1 = max(0, y - half)
+        x2 = min(image.shape[1], x + half)
+        y2 = min(image.shape[0], y + half)
+
+        roi = image[y1:y2, x1:x2]
+        if roi.size == 0:
+            return 0
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        # Apply HSV mask for red (handles both ends of hue scale)
+        mask1 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER1), np.array(config.RED_HSV_UPPER1))
+        mask2 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER2), np.array(config.RED_HSV_UPPER2))
+        mask = cv2.bitwise_or(mask1, mask2)
+
+        # Requirement: Apply Morphological Dilation to connect/inflate red pixels
+        kernel_size = getattr(config, "RED_ICON_DILATE_KERNEL", 3)
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        dilated = cv2.dilate(mask, kernel, iterations=1)
+
+        # Requirement: Count total red pixels (pixel density)
+        count = cv2.countNonZero(dilated)
+
+        if show_mask:
+            debug_roi = cv2.resize(dilated, (200, 200), interpolation=cv2.INTER_NEAREST)
+            cv2.imshow("Red Icon Mask (Debug)", debug_roi)
+            cv2.waitKey(1)
+
+        return count
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)

@@ -11,6 +11,7 @@ WINDOW_HEIGHT = 650 * 1.2
 
 # Debug and Visualization Settings
 DEBUG = True
+DEBUG_VISION = False  # Enables masked view for tuning pixel density
 ShowForbiddenArea = False  # Enables a visual overlay showing forbidden zones in red
 
 
@@ -42,12 +43,20 @@ NEW_LEVEL_THRESHOLD = 0.98
 # Detection gate settings
 RED_ICON_MIN_MATCHES = 1
 NEW_LEVEL_RED_ICON_MIN_MATCHES = 1
+RED_ICON_PIXEL_THRESHOLD = 50  # Min red pixels in ROI to trigger
+RED_ICON_DILATE_KERNEL = 3     # Size of dilation kernel to 'inflate' red pixels
+
+# Red Color HSV bounds (wider range for better detection)
+RED_HSV_LOWER1 = (0, 100, 100)
+RED_HSV_UPPER1 = (15, 255, 255)
+RED_HSV_LOWER2 = (165, 100, 100)
+RED_HSV_UPPER2 = (180, 255, 255)
 
 # Color verification for Red Icons
-RED_ICON_COLOR_CHECK = False
+RED_ICON_COLOR_CHECK = True
 RED_ICON_COLOR_MIN_RATIO = 1.15
 RED_ICON_COLOR_MIN_MEAN = 35
-RED_ICON_COLOR_SAMPLE_SIZE = 12
+RED_ICON_COLOR_SAMPLE_SIZE = 24
 
 # Position refinement and verification
 RED_ICON_VERIFY_PADDING = 24
