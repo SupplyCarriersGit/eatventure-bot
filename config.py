@@ -34,7 +34,7 @@ MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.94
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95
 STATS_RED_ICON_THRESHOLD = 0.97
-UPGRADE_STATION_THRESHOLD = 0.85
+UPGRADE_STATION_THRESHOLD = 0.92
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.95
 NEW_LEVEL_THRESHOLD = 0.98
@@ -44,7 +44,7 @@ RED_ICON_MIN_MATCHES = 1
 NEW_LEVEL_RED_ICON_MIN_MATCHES = 1
 
 # Color verification for Red Icons
-RED_ICON_COLOR_CHECK = True
+RED_ICON_COLOR_CHECK = False
 RED_ICON_COLOR_MIN_RATIO = 1.15
 RED_ICON_COLOR_MIN_MEAN = 35
 RED_ICON_COLOR_SAMPLE_SIZE = 12
@@ -100,14 +100,14 @@ MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.0015
 SCROLL_START_POS = (180, 390)
 
 # Distance in pixels for a single "standard" scroll step
-SCROLL_PIXEL_STEP = 150
+SCROLL_PIXEL_STEP = 120
 SCROLL_DISTANCE_RATIO = 1  # Default multiplier for non-incremental scrolls
 
 # Continuous Incremental Oscillating Search settings
-MAX_SCROLL_CYCLES = 20  # Maximum widening steps before resetting to cycle 1
+MAX_SCROLL_CYCLES = 15  # Maximum widening steps before resetting to cycle 1
 SCROLL_INCREMENT_STEP = 2  # Arithmetic progression increment
 SCROLL_INTERVAL_PAUSE = 0.5  # Time to wait between individual scroll steps
-CYCLE_PAUSE_DURATION = 2.0  # Time to wait after a full oscillation sequence
+CYCLE_PAUSE_DURATION = 0.5  # Time to wait after a full oscillation sequence
 
 # Visual smoothness and stability
 SCROLL_DURATION = 0.6  # How long each drag action takes
@@ -201,9 +201,9 @@ WAIT_UNLOCK_RETRY_DELAY = 0.1
 # Performance caching
 CAPTURE_CACHE_TTL = 0.008
 NEW_LEVEL_RED_ICON_CACHE_TTL = 0.01
-RED_ICON_STABILITY_CACHE_TTL = 0.18
+RED_ICON_STABILITY_CACHE_TTL = 0.3
 RED_ICON_STABILITY_RADIUS = 14
-RED_ICON_STABILITY_MIN_HITS = 2
+RED_ICON_STABILITY_MIN_HITS = 3
 RED_ICON_STABILITY_MAX_HISTORY = 10
 
 # Scan regions for Red Icons

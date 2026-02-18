@@ -1,0 +1,12 @@
+{
+  "ui": {
+    "inlineThinkingMode": "full",
+    "showMemoryUsage": true
+  },
+  "security": {
+    "enablePermanentToolApproval": true
+  },
+  "general": {
+    "defaultApprovalMode": "auto_edit"
+  }
+}
