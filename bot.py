@@ -2304,41 +2304,35 @@ class EatventureBot:
         return self.execute_oscillating_search()
     
     def handle_check_new_level(self, current_state):
+        """
+        Requirement: Priority Interrupt (Blocking Operation).
+        Executes the strictly linear level transition sequence without interruption.
+        """
         self._click_idle()
-        if config.IDLE_CLICK_SETTLE_DELAY > 0:
-            if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
-                return State.TRANSITION_LEVEL
+        logger.info(">>> PRIORITY INTERRUPT: Level Transition Sequence Started")
 
-        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        if self._should_interrupt_for_new_level(
-            screenshot=limited_screenshot,
-            max_y=config.MAX_SEARCH_Y,
-        ):
-            return State.TRANSITION_LEVEL
-        
-        logger.info(f"Clicking new level button position at {config.NEW_LEVEL_BUTTON_POS}")
+        # STEP 1: Halt & Click 1 (Acknowledge Level Completion)
+        # NEW_LEVEL_BUTTON_POS: The button at the bottom left that triggers the move.
+        logger.info("Step 1: Clicking new level button acknowledgment at %s", config.NEW_LEVEL_BUTTON_POS)
         self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
 
-        button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
-        if button_delay > 0:
-            if self._sleep_with_interrupt(button_delay):
-                return State.TRANSITION_LEVEL
+        # STEP 2: Animation Buffer (Wait for City Travel UI)
+        # Requirement: Blocking wait to ensure Next City UI has fully loaded.
+        buffer_time = getattr(config, "TRANSITION_POST_CLICK_DELAY", 0.8)
+        logger.info("Step 2: Animation Buffer (%ss)", buffer_time)
+        time.sleep(buffer_time)
 
-        logger.info(f"Clicking new level position at {config.NEW_LEVEL_POS}")
-        self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
-        
-        if button_delay > 0:
-            if self._sleep_with_interrupt(button_delay):
-                return State.TRANSITION_LEVEL
-        
-        logger.info(f"Clicking level transition position at {config.LEVEL_TRANSITION_POS}")
+        # STEP 3: Click 2 (Confirm Travel)
+        # LEVEL_TRANSITION_POS: The button in the center of the pop-up to travel.
+        logger.info("Step 3: Clicking confirm travel at %s", config.LEVEL_TRANSITION_POS)
         self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
         
-        followup_delay = getattr(config, "NEW_LEVEL_FOLLOWUP_DELAY", 0.02)
-        if followup_delay > 0:
-            if self._sleep_with_interrupt(followup_delay):
-                return State.TRANSITION_LEVEL
+        # Short stabilization wait
+        time.sleep(getattr(config, "NEW_LEVEL_FOLLOWUP_DELAY", 0.3))
 
+        # STEP 4: State Commitment
+        # Only return the next state after the sequence is physically complete.
+        logger.info(">>> PRIORITY INTERRUPT Complete. Entering Transition State.")
         return State.TRANSITION_LEVEL
     
     def handle_transition_level(self, current_state):
