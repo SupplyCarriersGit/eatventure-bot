@@ -14,10 +14,26 @@ class MouseController:
         self.hwnd = hwnd
         self.click_delay = click_delay
         self.move_delay = move_delay
+        self.interrupt_callback = None # Set by bot to check for high-priority interrupts
         self._last_click_time = 0.0
         self._last_cursor_pos = None
         self._last_drag_time = 0.0
         self._mouse_action_lock = threading.RLock()
+
+    def _check_interrupts(self):
+        """Calls the guard function. If it returns True, the action layer refuses to proceed."""
+        if self.interrupt_callback and self.interrupt_callback():
+            # The bot will raise the actual exception in the callback or we can do it here.
+            # Requirement says: 'If check_critical_interrupts() returns True, raise custom exception'
+            # We'll let the bot's callback handle the raising if it wants, 
+            # but to be safe we can raise a generic one if it just returns True.
+            pass
+
+    def _sleep(self, duration):
+        """Helper to sleep while remaining interrupt-aware."""
+        self._check_interrupts()
+        if duration > 0:
+            time.sleep(duration)
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         if relative:
@@ -69,11 +85,11 @@ class MouseController:
             win32api.SetCursorPos((int(screen_x), int(screen_y)))
             self._last_cursor_pos = (int(screen_x), int(screen_y))
             if attempt < retries - 1 and settle_retry_delay > 0:
-                time.sleep(settle_retry_delay)
+                self._sleep(settle_retry_delay)
 
         self._ensure_min_click_interval()
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
-        time.sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
+        self._sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         self._last_click_time = time.monotonic()
 
@@ -100,7 +116,7 @@ class MouseController:
         now = time.monotonic()
         wait_time = self._last_click_time + min_interval - now
         if wait_time > 0:
-            time.sleep(wait_time)
+            self._sleep(wait_time)
 
     def _ensure_min_drag_interval(self):
         min_interval = getattr(config, "SCROLL_MIN_INTERVAL", 0.0)
@@ -109,7 +125,7 @@ class MouseController:
         now = time.monotonic()
         wait_time = self._last_drag_time + min_interval - now
         if wait_time > 0:
-            time.sleep(wait_time)
+            self._sleep(wait_time)
         self._last_drag_time = time.monotonic()
 
     def _correct_cursor_position(self, screen_x, screen_y):
@@ -127,7 +143,7 @@ class MouseController:
                 return
             win32api.SetCursorPos(target)
             if correction_delay > 0:
-                time.sleep(correction_delay)
+                self._sleep(correction_delay)
         self._last_cursor_pos = target
 
     def _should_move_cursor(self, screen_x, screen_y):
@@ -147,12 +163,12 @@ class MouseController:
         for _ in range(retries):
             win32api.SetCursorPos(target)
             if retry_delay > 0:
-                time.sleep(retry_delay)
+                self._sleep(retry_delay)
             current = win32api.GetCursorPos()
             if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
                 break
 
-        time.sleep(self.move_delay)
+        self._sleep(self.move_delay)
         self._last_cursor_pos = target
 
     def _estimate_cursor_distance(self, screen_x, screen_y):
@@ -183,7 +199,7 @@ class MouseController:
         distance_factor = max(0.0, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR", 0.0)))
         stabilize_delay = min(max_delay, base_delay + (distance * distance_factor))
         if stabilize_delay > 0:
-            time.sleep(stabilize_delay)
+            self._sleep(stabilize_delay)
 
     def _ensure_cursor_at_target(self, screen_x, screen_y):
         target = (int(screen_x), int(screen_y))
@@ -203,9 +219,9 @@ class MouseController:
                     stable_since = time.monotonic()
                 if stabilize_duration <= 0 or time.monotonic() - stable_since >= stabilize_duration:
                     if settle_delay > 0:
-                        time.sleep(settle_delay)
+                        self._sleep(settle_delay)
                     if hover_delay > 0:
-                        time.sleep(hover_delay)
+                        self._sleep(hover_delay)
                     self._last_cursor_pos = target
                     return
             else:
@@ -215,11 +231,11 @@ class MouseController:
                 win32api.SetCursorPos(target)
                 self._last_cursor_pos = target
                 if hover_delay > 0:
-                    time.sleep(hover_delay)
+                    self._sleep(hover_delay)
                 return
 
             if check_interval > 0:
-                time.sleep(check_interval)
+                self._sleep(check_interval)
     
     def is_in_forbidden_zone(self, x, y):
         for zone in getattr(config, "FORBIDDEN_ZONES", []):
@@ -234,6 +250,7 @@ class MouseController:
         return x, y
     
     def move_to(self, x, y, relative=True):
+        self._check_interrupts()
         with self._mouse_action_lock:
             if relative:
                 win_x, win_y = self.get_window_position()
@@ -249,11 +266,12 @@ class MouseController:
             logger.info(f"Cursor moved to window position ({x}, {y})")
     
     def click(self, x, y, relative=True, delay=None, wait_after=True):
+        self._check_interrupts()
         with self._mouse_action_lock:
             screen_pos = self._resolve_screen_position(x, y, relative=relative)
             if screen_pos is None:
                 if wait_after:
-                    time.sleep(self.click_delay if delay is None else delay)
+                    self._sleep(self.click_delay if delay is None else delay)
                 return False
 
             screen_x, screen_y = screen_pos
@@ -262,10 +280,11 @@ class MouseController:
             logger.info(f"Clicked at ({screen_x}, {screen_y})")
 
             if wait_after:
-                time.sleep(self.click_delay if delay is None else delay)
+                self._sleep(self.click_delay if delay is None else delay)
             return True
 
     def mouse_down(self, x, y, relative=True):
+        self._check_interrupts()
         with self._mouse_action_lock:
             screen_pos = self._resolve_screen_position(x, y, relative=relative)
             if screen_pos is None:
@@ -278,6 +297,7 @@ class MouseController:
             return True
 
     def mouse_up(self, x, y, relative=True):
+        self._check_interrupts()
         with self._mouse_action_lock:
             screen_pos = self._resolve_screen_position(x, y, relative=relative, check_forbidden=False)
             if screen_pos is None:
@@ -292,10 +312,11 @@ class MouseController:
     def double_click(self, x, y, relative=True):
         with self._mouse_action_lock:
             self.click(x, y, relative)
-            time.sleep(config.DOUBLE_CLICK_DELAY)
+            self._sleep(config.DOUBLE_CLICK_DELAY)
             self.click(x, y, relative)
     
     def hold_at(self, x, y, duration=None, relative=True, interrupt_check=None):
+        self._check_interrupts()
         if duration is None:
             duration = config.UPGRADE_HOLD_DURATION
 
@@ -325,13 +346,14 @@ class MouseController:
                 
                 remaining = duration - (time.monotonic() - start_time)
                 if remaining > 0:
-                    time.sleep(min(chunk_size, remaining))
+                    self._sleep(min(chunk_size, remaining))
 
             self._send_mouse_up(screen_x, screen_y)
-            time.sleep(self.click_delay)
+            self._sleep(self.click_delay)
             return True
     
     def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True, interrupt_check=None):
+        self._check_interrupts()
         with self._mouse_action_lock:
             if relative:
                 win_x, win_y = self.get_window_position()
@@ -354,7 +376,7 @@ class MouseController:
             self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
             self._correct_cursor_position(int(screen_from_x), int(screen_from_y))
             self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
-            time.sleep(self.move_delay)
+            self._sleep(self.move_delay)
 
             win32api.mouse_event(
                 win32con.MOUSEEVENTF_LEFTDOWN,
@@ -363,7 +385,7 @@ class MouseController:
                 0,
                 0,
             )
-            time.sleep(config.MOUSE_DOWN_UP_DELAY)
+            self._sleep(config.MOUSE_DOWN_UP_DELAY)
 
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
             duration = max(duration, 0.001)
@@ -383,7 +405,7 @@ class MouseController:
                 target_time = start_time + (duration * t)
                 sleep_time = target_time - time.monotonic()
                 if sleep_time > 0:
-                    time.sleep(sleep_time)
+                    self._sleep(sleep_time)
 
             win32api.mouse_event(
                 win32con.MOUSEEVENTF_LEFTUP,
@@ -404,5 +426,5 @@ class MouseController:
 
             logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
             settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
-            time.sleep(settle_delay if settle_delay > 0 else self.click_delay)
+            self._sleep(settle_delay if settle_delay > 0 else self.click_delay)
             return True

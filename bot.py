@@ -17,6 +17,16 @@ import config
 logger = logging.getLogger(__name__)
 
 
+class LevelCompleteInterrupt(Exception):
+    """Raised when a new level is detected to immediately halt standard gameplay."""
+    pass
+
+
+class BotStoppedInterrupt(Exception):
+    """Raised when the bot is stopped to immediately halt all actions."""
+    pass
+
+
 class AdaptiveTuner:
     def __init__(self):
         self.enabled = config.ADAPTIVE_TUNER_ENABLED
@@ -599,6 +609,7 @@ class EatventureBot:
             config.CLICK_DELAY,
             config.MOUSE_MOVE_DELAY
         )
+        self.mouse_controller.interrupt_callback = self.check_critical_interrupts
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
         
         self.register_states()
@@ -680,6 +691,7 @@ class EatventureBot:
         logger.info("Bot initialized successfully")
 
     def _record_new_level_interrupt(self, source, confidence, x, y):
+        # ... existing logic ...
         if self._should_ignore_new_level_signal(source=source):
             logger.debug(
                 "Ignoring background %s signal while in %s",
@@ -698,6 +710,33 @@ class EatventureBot:
         self._new_level_event.set()
         self._mark_restaurant_completed(source, confidence)
 
+    def check_critical_interrupts(self, raise_exception=True):
+        """
+        The Global Safety Check (Deep Hook).
+        Returns True if a critical interrupt is pending, or raises an exception to halt actions.
+        """
+        # 1. Check if bot was stopped by user
+        if not self.running:
+            if raise_exception:
+                raise BotStoppedInterrupt("Bot stopped")
+            return True
+
+        # 2. Check for New Level (Requirement)
+        if self._new_level_event.is_set():
+            if raise_exception:
+                logger.info("!!! Critical Interrupt: New Level detected. Halting current action.")
+                # Raising exception here as per 'Exception-Based Control Flow' requirement
+                raise LevelCompleteInterrupt("New level reached")
+            return True
+            
+        return False
+
+    def sleep(self, duration):
+        """Centralized sleep that is aware of high-priority interrupts."""
+        self.check_critical_interrupts()
+        if duration > 0:
+            time.sleep(duration)
+
     def _consume_new_level_interrupt(self):
         if not self._new_level_event.is_set():
             return None
@@ -710,22 +749,18 @@ class EatventureBot:
     def _should_ignore_new_level_signal(self, source, state=None):
         # Ignore ALL new level signals (icons and buttons) during critical phases.
         # This prevents the bot from jumping back to TRANSITION_LEVEL while 
-        # it is already waiting for the new level to settle.
+        # it is already in the middle of a transition.
         active_state = state or self.state_machine.get_state()
         critical_states = (
-            State.WAIT_FOR_UNLOCK,
             State.TRANSITION_LEVEL,
             State.CHECK_NEW_LEVEL,
-            State.CHECK_UNLOCK,
-            State.SEARCH_UPGRADE_STATION,
-            State.HOLD_UPGRADE_STATION,
         )
         if active_state in critical_states:
             return True
             
-        # Also enforce a hard cooldown after a transition to handle game lag/echoes
+        # Also enforce a short cooldown after a transition to handle game lag/echoes
         if source == "new level button" or source == "new level red icon":
-            if time.monotonic() - self._last_transition_time < 30.0:
+            if time.monotonic() - self._last_transition_time < 5.0:
                 return True
                 
         return False
@@ -801,7 +836,7 @@ class EatventureBot:
         return False
 
     def resolve_priority_state(self, current_state):
-        if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL, State.WAIT_FOR_UNLOCK):
+        if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
             return None
 
         if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
@@ -820,7 +855,11 @@ class EatventureBot:
             if self._no_red_scroll_cycle_pending:
                 logger.info("Clearing deferred no-red scroll due to pending level transition interrupt")
                 self._no_red_scroll_cycle_pending = False
-            self._click_new_level_override(source=interrupt["source"])
+            self._click_new_level_override(
+                source=interrupt["source"],
+                x=interrupt["x"],
+                y=interrupt["y"]
+            )
             return State.TRANSITION_LEVEL
 
         priority_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
@@ -905,7 +944,7 @@ class EatventureBot:
 
         return stable
 
-    def _click_new_level_override(self, source=None):
+    def _click_new_level_override(self, source=None, x=None, y=None):
         now = time.monotonic()
         cooldown = getattr(config, "NEW_LEVEL_OVERRIDE_COOLDOWN", 0.0)
         if cooldown > 0 and now - self._last_new_level_override_time < cooldown:
@@ -915,16 +954,17 @@ class EatventureBot:
 
         self._mark_restaurant_completed(source or "priority override")
 
+        # Use detected coordinates if provided, otherwise fallback to config
+        click_x = x if x is not None else config.NEW_LEVEL_BUTTON_POS[0]
+        click_y = y if y is not None else config.NEW_LEVEL_BUTTON_POS[1]
+
         logger.info(
-            "Priority override: clicking new level button position at (%s, %s)",
-            config.NEW_LEVEL_BUTTON_POS[0],
-            config.NEW_LEVEL_BUTTON_POS[1],
+            "Priority override: clicking %s at (%s, %s)",
+            source or "button",
+            click_x,
+            click_y,
         )
-        self.mouse_controller.click(
-            config.NEW_LEVEL_BUTTON_POS[0],
-            config.NEW_LEVEL_BUTTON_POS[1],
-            relative=True,
-        )
+        self.mouse_controller.click(click_x, click_y, relative=True)
 
         button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
         if button_delay > 0:
@@ -983,6 +1023,9 @@ class EatventureBot:
             return False
 
         while now < target_time:
+            # Check for critical interrupts (like Level Complete)
+            self.check_critical_interrupts()
+            
             remaining = max(0, target_time - now)
             time.sleep(min(interval, remaining))
             if self._new_level_event.is_set():
@@ -1014,6 +1057,9 @@ class EatventureBot:
         interval = max(0.01, config.NEW_LEVEL_INTERRUPT_INTERVAL)
         
         while time.monotonic() < target_time:
+            # Check for critical interrupts (like Level Complete)
+            self.check_critical_interrupts()
+            
             # 1. Check for Level Transition (High Priority)
             if self._should_interrupt_for_new_level(force=True):
                 return State.TRANSITION_LEVEL
@@ -1576,6 +1622,7 @@ class EatventureBot:
 
     def check_priority_targets(self):
         """STEP A: Priority Scan. Checks for Red Icons and Level Transitions."""
+        self.check_critical_interrupts()
         screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
         
         # 1. Check for Level Transition
@@ -1600,11 +1647,13 @@ class EatventureBot:
 
     def check_main_success(self):
         """STEP B: Main Target Scan. Reserved for specific success conditions."""
+        self.check_critical_interrupts()
         # In current context, Red Icons are the primary success, handled by priority.
         return None
 
     def check_fallbacks(self):
         """STEP C: Fallback Scan. Clicks boxes and stations without returning success."""
+        self.check_critical_interrupts()
         screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
         self._scan_and_click_non_red_assets(screenshot)
 
@@ -1841,90 +1890,48 @@ class EatventureBot:
         self.state_machine.register_handler(State.WAIT_FOR_UNLOCK, self.handle_wait_for_unlock)
     
     def handle_find_red_icons(self, current_state):
+        """
+        Refactored: Scenario-Based Action Layer.
+        Implements clean Scenario A/B/C branching using Guard Clauses.
+        """
+        self.check_critical_interrupts()
         self._click_idle()
 
-        self.work_done = False
-        self.forbidden_icon_scrolls = 0
-        
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = screenshot[:config.MAX_SEARCH_Y, :]
+        # Step 1: Discovery Pipeline (Decomposed)
+        actionable_icons, obscured_count = self._get_filtered_target_data()
 
-        if self._should_interrupt_for_new_level(
-            screenshot=limited_screenshot,
-            max_y=config.MAX_SEARCH_Y,
-            force=True,
-        ):
-            logger.info("New level detected during scan, transitioning")
-            return State.TRANSITION_LEVEL
-
-        self.red_icons = self._detect_red_icons_in_view(
-            screenshot,
-            max_y=config.MAX_SEARCH_Y,
-        )
-        self.red_icons = self._stable_red_icons(self.red_icons)
-
-        self.vision_optimizer.update_red_icon_scan([conf for conf, _, _ in self.red_icons])
-
-        logger.info(
-            "Red Icon Detection: %s valid icons found (min %s template matches)",
-            len(self.red_icons),
-            config.RED_ICON_MIN_MATCHES,
-        )
-
-        red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
-            screenshot=screenshot,
-            max_y=config.MAX_SEARCH_Y,
-            force=True,
-        )
-        if red_found:
-            # Verify with a template match to be sure it's not just a reward
-            found_btn, _, _, _ = self._detect_new_level(screenshot=screenshot, max_y=config.MAX_SEARCH_Y)
-            
-            if self.red_icons and not found_btn:
-                logger.info("Potential new level (red icon) detected on map, but prioritizing station upgrades first")
-            else:
-                self._mark_restaurant_completed("new level red icon", red_conf)
-                logger.info(f"New level detected! Red icon at ({red_x}, {red_y})")
-                return State.CHECK_NEW_LEVEL
-        
-        if not self.red_icons:
-            clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
-            if clicked_targets > 0:
-                logger.info(
-                    "No red icons detected; fallback clicked %s non-red assets. Proceeding to scrolling cycle.",
-                    clicked_targets,
-                )
-                return State.SCROLL
-
-            logger.info("No valid red icons after scan; no fallback assets found, scrolling to search")
-            return State.SCROLL
-        else:
-            filtered_icons, forbidden_zone_count = self._filter_forbidden_red_icons(self.red_icons)
-            if forbidden_zone_count > 0:
-                logger.info(f"Forbidden Zone Filter: {forbidden_zone_count} icons removed")
-            
-            if not filtered_icons:
-                clicked_targets = self._scan_and_click_non_red_assets(limited_screenshot)
-                if clicked_targets > 0:
-                    logger.info(
-                        "Filtered red icons to zero; fallback clicked %s non-red assets. Proceeding to scrolling cycle.",
-                        clicked_targets,
-                    )
-                    return State.SCROLL
-
-                logger.info("No valid red icons after filtering; no fallback assets found, scrolling to search")
-                return State.SCROLL
-            
-            self.red_icons = self._prioritize_red_icons(filtered_icons)
-            
-            logger.info(f"✓ {len(self.red_icons)} red icons ready to process")
+        # STEP 2: Scenario A - Valid Targets Found
+        if actionable_icons:
+            logger.info(f"✓ {len(actionable_icons)} valid targets in safe zone.")
+            self.red_icons = self._prioritize_red_icons(actionable_icons)
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
-            # Removed: reset oscillation cycle here to allow persistence
             self.work_done = True
             return State.CLICK_RED_ICON
+
+        # STEP 3: Scenario B - Obscured Targets Exist
+        if obscured_count > 0:
+            logger.warning(f"⚠ {obscured_count} targets obscured by Forbidden Zone. Scrolling to free.")
+            return State.SCROLL
+
+        # STEP 4: Scenario C - No Targets (Fallback scan then search)
+        self.check_fallbacks()
+        logger.info("No targets detected; initiating exploration.")
+        return State.SCROLL
+
+    def _get_filtered_target_data(self):
+        """Decomposed responsibility: Pipeline for fetching and filtering icons."""
+        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        
+        # 1. Capture & Debounce
+        raw_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
+        stable_icons = self._stable_red_icons(raw_icons)
+        
+        # 2. Filter by Forbidden Zone
+        return self._filter_forbidden_red_icons(stable_icons)
     
     def handle_click_red_icon(self, current_state):
+        self.check_critical_interrupts()
         if self.current_red_icon_index >= len(self.red_icons):
             logger.info("All red icons processed, continuing cycle")
             return State.OPEN_BOXES
@@ -1983,6 +1990,7 @@ class EatventureBot:
         return State.CHECK_UNLOCK
     
     def handle_check_unlock(self, current_state):
+        self.check_critical_interrupts()
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
         
         clicked_unlock = False
@@ -2008,6 +2016,7 @@ class EatventureBot:
         return State.SEARCH_UPGRADE_STATION
     
     def handle_search_upgrade_station(self, current_state):
+        self.check_critical_interrupts()
         max_attempts = config.UPGRADE_STATION_SEARCH_MAX_ATTEMPTS
         base_threshold = (
             self.vision_optimizer.upgrade_station_threshold
@@ -2080,6 +2089,7 @@ class EatventureBot:
         return State.OPEN_BOXES
     
     def handle_hold_upgrade_station(self, current_state):
+        self.check_critical_interrupts()
         base_pos = self.upgrade_station_pos
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
         hold_threshold = (
@@ -2124,20 +2134,15 @@ class EatventureBot:
                 return State.CLICK_RED_ICON
             return State.OPEN_BOXES
         
-        logger.info("Holding upgrade station click (Exempt from interrupts)...")
-
-        # Define interrupt check for hold_at (Disabled for exemption)
-        def check_interrupts():
-            return False
+        logger.info("Holding upgrade station click...")
 
         start_time = time.monotonic()
         
-        # Use the hold action - interrupts are now disabled via the callback
+        # Use the hold action - it's now interrupt-aware via the MouseController global hook
         self.mouse_controller.hold_at(
             x, y, 
             duration=config.UPGRADE_HOLD_DURATION, 
-            relative=True, 
-            interrupt_check=check_interrupts
+            relative=True
         )
 
         elapsed_time = time.monotonic() - start_time
@@ -2155,7 +2160,8 @@ class EatventureBot:
         return State.UPGRADE_STATS
     
     def handle_upgrade_stats(self, current_state):
-        logger.info("⬆ Stats upgrade starting (Exempt from interrupts)")
+        self.check_critical_interrupts()
+        logger.info("⬆ Stats upgrade starting")
         self._click_idle()
         
         extended_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
@@ -2171,7 +2177,7 @@ class EatventureBot:
         logger.info("✓ Stats icon found, upgrading")
         self.mouse_controller.click(config.STATS_UPGRADE_BUTTON_POS[0], config.STATS_UPGRADE_BUTTON_POS[1], relative=True)
         # Use standard non-interruptible sleep
-        time.sleep(config.STATE_DELAY)
+        self.sleep(config.STATE_DELAY)
         
         start_time = time.monotonic()
         next_click_time = start_time
@@ -2198,6 +2204,7 @@ class EatventureBot:
         return State.OPEN_BOXES
     
     def handle_open_boxes(self, current_state):
+        self.check_critical_interrupts()
         self._click_idle()
         
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
@@ -2269,6 +2276,7 @@ class EatventureBot:
             return State.FIND_RED_ICONS
     
     def handle_scroll(self, current_state):
+        self.check_critical_interrupts()
         self._click_idle()
         
         # 1. DRIFT CORRECTION: If we are not at center (due to interrupt), return to center first.
@@ -2308,30 +2316,42 @@ class EatventureBot:
         Requirement: Priority Interrupt (Blocking Operation).
         Executes the strictly linear level transition sequence without interruption.
         """
+        self._new_level_event.clear() # Clear the interrupt signal
         self._click_idle()
         logger.info(">>> PRIORITY INTERRUPT: Level Transition Sequence Started")
 
-        # STEP 1: Halt & Click 1 (Acknowledge Level Completion)
-        # NEW_LEVEL_BUTTON_POS: The button at the bottom left that triggers the move.
-        logger.info("Step 1: Clicking new level button acknowledgment at %s", config.NEW_LEVEL_BUTTON_POS)
-        self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
-
-        # STEP 2: Animation Buffer (Wait for City Travel UI)
-        # Requirement: Blocking wait to ensure Next City UI has fully loaded.
-        buffer_time = getattr(config, "TRANSITION_POST_CLICK_DELAY", 0.8)
-        logger.info("Step 2: Animation Buffer (%ss)", buffer_time)
-        time.sleep(buffer_time)
-
-        # STEP 3: Click 2 (Confirm Travel)
-        # LEVEL_TRANSITION_POS: The button in the center of the pop-up to travel.
-        logger.info("Step 3: Clicking confirm travel at %s", config.LEVEL_TRANSITION_POS)
-        self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+        # 1. First, check if the Travel button is ALREADY visible (pop-up open)
+        found, conf, x, y = self._detect_new_level(force=False)
         
-        # Short stabilization wait
+        if found and y < 600: # If it's the center Travel button
+            logger.info("City travel pop-up already open. Clicking detected button at (%s, %s)", x, y)
+            self.mouse_controller.click(x, y, relative=True)
+        else:
+            # STEP 1: Halt & Click 1 (Acknowledge Level Completion - Bottom Left)
+            logger.info("Step 1: Clicking new level button acknowledgment at %s", config.NEW_LEVEL_BUTTON_POS)
+            self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
+
+            # STEP 2: Animation Buffer (Wait for City Travel UI)
+            buffer_time = getattr(config, "TRANSITION_POST_CLICK_DELAY", 0.8)
+            logger.info("Step 2: Animation Buffer (%ss)", buffer_time)
+            time.sleep(buffer_time)
+
+            # STEP 3: Click 2 (Confirm Travel - Center)
+            # We try to detect the exact position again for precision
+            found_nl, conf_nl, x_nl, y_nl = self._detect_new_level(force=True)
+            if found_nl:
+                logger.info("Step 3: Clicking detected travel button at (%s, %s)", x_nl, y_nl)
+                self.mouse_controller.click(x_nl, y_nl, relative=True)
+            else:
+                logger.info("Step 3: Clicking config travel positions (backup)")
+                self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
+                time.sleep(0.1)
+                self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+        
+        # Final stabilization wait
         time.sleep(getattr(config, "NEW_LEVEL_FOLLOWUP_DELAY", 0.3))
 
         # STEP 4: State Commitment
-        # Only return the next state after the sequence is physically complete.
         logger.info(">>> PRIORITY INTERRUPT Complete. Entering Transition State.")
         return State.TRANSITION_LEVEL
     
@@ -2422,59 +2442,81 @@ class EatventureBot:
         self.scroll_offset_units = 0
     
     def handle_wait_for_unlock(self, current_state):
+        """
+        Requirement: High-Frequency Visual Polling.
+        Minimizes time between station availability and interaction to near-zero.
+        """
         self._click_idle()
+        max_duration = 5.0  # Smart Timeout: 5 seconds
+        start_time = time.monotonic()
+        polling_interval = 0.05  # 50ms tight loop
         
-        # 1. PRE-ACTION DELAY: Wait on first attempt to allow animation to start/finish
-        if self.wait_for_unlock_attempts == 0:
-            pre_delay = getattr(config, "PRE_UNLOCK_DELAY", 0.5)
-            if pre_delay > 0:
-                logger.debug(f"Pre-unlock delay: waiting {pre_delay}s for UI stability")
-                if self._sleep_with_interrupt(pre_delay):
-                    return State.TRANSITION_LEVEL
+        logger.info(">>> HOT LOOP: Polling for Unlock button (Max 5s duration)...")
 
-        if config.IDLE_CLICK_SETTLE_DELAY > 0:
-            if self._sleep_with_interrupt(config.IDLE_CLICK_SETTLE_DELAY):
-                return State.TRANSITION_LEVEL
+        while time.monotonic() - start_time < max_duration:
+            # 1. INTERRUPT CHECK: Ensure immediate stop
+            if not self.running:
+                return None
+
+            # 2. CAPTURE & SCAN
+            # Use force=True to bypass cache for real-time reactivity
+            screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+
+            # SAFETY CHECK: If the travel button appears, transition likely failed or pop-up is persistent
+            found_nl, _, x_nl, y_nl = self._detect_new_level(screenshot=screenshot)
+            if found_nl:
+                logger.warning("Detected transition button during unlock polling; returning to CHECK_NEW_LEVEL")
+                return State.CHECK_NEW_LEVEL
+
+            # STEP A: Tight check for Unlock button
+            if "unlock" in self.templates:
+                template, mask = self.templates["unlock"]
+                found, confidence, x, y = self.image_matcher.find_template(
+                    screenshot, template, mask=mask,
+                    threshold=config.UNLOCK_THRESHOLD, template_name="unlock-poll"
+                )
+
+                if found:
+                    # STEP B: CLICK IMMEDIATELY
+                    logger.info(f"Unlock button detected [conf: {confidence:.2f}]. Clicking immediately.")
+                    self.mouse_controller.click(x, y, relative=True, wait_after=False)
+                    
+                    # STEP C: Verify click success (Check if button disappeared)
+                    # We wait 100ms for UI to register and then re-verify
+                    time.sleep(0.1)
+                    v_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+                    v_found, _, _, _ = self.image_matcher.find_template(
+                        v_screenshot, template, mask=mask,
+                        threshold=config.UNLOCK_THRESHOLD, template_name="unlock-verify"
+                    )
+                    
+                    if not v_found:
+                        logger.info(f"✓ Station Unlocked! Total latency: {time.monotonic() - start_time:.2f}s")
+                        self.wait_for_unlock_attempts = 0
+                        return State.FIND_RED_ICONS
+                    else:
+                        logger.debug("Unlock click not registered by UI; retrying next poll...")
+
+            # Maintain the tight polling cadence
+            time.sleep(polling_interval)
+            
+        # --- SMART TIMEOUT EXIT STRATEGY ---
+        logger.warning(f"!!! Timeout: Unlock button not found within {max_duration}s.")
         
-        self.wait_for_unlock_attempts += 1
-        logger.debug(f"Waiting for unlock button (attempt {self.wait_for_unlock_attempts}/{self.max_wait_for_unlock_attempts})")
+        # Step 1: Immediate Sanity Check for Level Completion
+        # If we couldn't find the unlock button, it might be because the level is already finished.
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        found_nl, conf_nl, x_nl, y_nl = self._detect_new_level(screenshot=screenshot)
         
-        if self.wait_for_unlock_attempts > self.max_wait_for_unlock_attempts:
-            logger.warning(f"Unlock button not found after {self.max_wait_for_unlock_attempts} attempts, resetting to scroll")
+        if found_nl:
+            logger.info("Smart Timeout: Detected new level button after unlock timeout. Triggering transition.")
             self.wait_for_unlock_attempts = 0
-            return State.FIND_RED_ICONS
-        
-        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-
-        if "unlock" in self.templates:
-            template, mask = self.templates["unlock"]
-            found, confidence, x, y = self.image_matcher.find_template(
-                screenshot, template, mask=mask,
-                threshold=config.UNLOCK_THRESHOLD, template_name="unlock"
-            )
-
-            if found:
-                logger.info(f"Unlock button found at ({x}, {y}) [conf: {confidence:.2f}] on attempt {self.wait_for_unlock_attempts}")
-                self.mouse_controller.click(x, y, relative=True)
-                if config.UNLOCK_POST_CLICK_DELAY > 0:
-                    if self._sleep_with_interrupt(config.UNLOCK_POST_CLICK_DELAY):
-                        return State.TRANSITION_LEVEL
-                logger.info("Starting new level")
-                self.wait_for_unlock_attempts = 0
-                return State.FIND_RED_ICONS
-        
-        # 2. SMART WAITING (Variable Backoff):
-        # If we fail the initial checks, wait longer to let animation finish.
-        retry_delay = config.WAIT_UNLOCK_RETRY_DELAY
-        backoff_threshold = getattr(config, "UNLOCK_BACKOFF_THRESHOLD", 3)
-        if self.wait_for_unlock_attempts > backoff_threshold:
-            retry_delay = getattr(config, "UNLOCK_MAX_RETRY_DELAY", 1.0)
-            logger.debug(f"Unlock backoff active: increasing retry delay to {retry_delay}s")
-
-        if retry_delay > 0:
-            if self._sleep_with_interrupt(retry_delay):
-                return State.TRANSITION_LEVEL
-        return State.WAIT_FOR_UNLOCK
+            return State.CHECK_NEW_LEVEL
+            
+        # Step 2: Standard Fallback
+        logger.info("Smart Timeout: No level transition detected. Falling back to search.")
+        self.wait_for_unlock_attempts = 0
+        return State.FIND_RED_ICONS
     
     def start(self):
         if self.running:
@@ -2522,7 +2564,16 @@ class EatventureBot:
         self._clear_capture_cache()
         self._apply_tuning()
         self._enforce_state_min_interval()
-        self.state_machine.update()
+        try:
+            self.state_machine.update()
+        except LevelCompleteInterrupt:
+            # Handle the priority interrupt: Force transition to New Level check
+            logger.info("Handling LevelCompleteInterrupt: Switching to CHECK_NEW_LEVEL state.")
+            self.state_machine.transition(State.CHECK_NEW_LEVEL)
+        except BotStoppedInterrupt:
+            # Bot was stopped, just exit the step
+            logger.debug("BotStoppedInterrupt caught in step")
+            pass
 
     def run(self):
         self.start()

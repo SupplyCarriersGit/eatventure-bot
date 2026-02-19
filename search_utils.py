@@ -7,117 +7,105 @@ logger = logging.getLogger(__name__)
 
 class OscillatingSearcher:
     """
-    Principal Architect Implementation: OscillatingSearcher
-    A robust, fail-safe searching engine designed to systematically explore 
-    a viewport while preventing logic loops and vision blindness.
+    Refactored Algorithm Engine: Implements the Interleaved Arithmetic Progression 
+    Search Strategy with high-priority interrupt sensitivity.
     """
 
     def __init__(self, bot: Any):
-        """
-        Initializes the searcher with canonical configurations.
-        :param bot: The main bot instance providing vision and mouse control.
-        """
         self.bot = bot
-        self.max_retries = getattr(config, "OSCILLATION_MAX_RETRIES", 10)
-        self.start_pos = getattr(config, "SCROLL_START_POS", (812, 540))
-        self.base_step = getattr(config, "SCROLL_PIXEL_STEP", 150)
-        self.ratio = getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
-        self.settle_time = getattr(config, "OSCILLATION_SETTLE_TIME", 0.5)
-
-    def perform_scroll(self, direction: Any, distance_ratio: Optional[float] = None, duration: float = 0.5):
-        """
-        Requirement: The "Click vs. Drag" Fix.
-        Executes a functional Drag Gesture (Mouse Down -> Move -> Mouse Up).
-        :param direction: 1 or 'DOWN' for Scroll Down, -1 or 'UP' for Scroll Up.
-        :param distance_ratio: Optional multiplier to override default scroll distance.
-        :param duration: Time in seconds for the swipe movement.
-        """
-        # Map string directions to integers
-        if isinstance(direction, str):
-            dir_map = {"DOWN": 1, "UP": -1}
-            dir_int = dir_map.get(direction.upper(), 1)
-        else:
-            dir_int = direction
-
-        start_x, start_y = self.start_pos
-        ratio = distance_ratio if distance_ratio is not None else self.ratio
-        dist = int(self.base_step * ratio)
-        
-        # Directional Logic:
-        # Scroll Down (1) -> Drag UP (y decreases)
-        # Scroll Up (-1) -> Drag DOWN (y increases)
-        end_y = start_y - (dist * dir_int)
-
-        logger.info(f"[Scroll] Executing Drag: ({start_x}, {start_y}) -> ({start_x}, {end_y}) [dir={direction}, ratio={ratio:.2f}]")
-        
-        # Use the built-in drag method which handles down, steps, duration, and up.
-        success = self.bot.mouse_controller.drag(
-            start_x, start_y, 
-            start_x, end_y, 
-            duration=duration, 
-            relative=True
-        )
-        
-        if success:
-            # Update bot's internal drift tracking for drift correction
-            if hasattr(self.bot, 'scroll_offset_units'):
-                self.bot.scroll_offset_units -= (ratio * dir_int)
+        self.max_cycles = getattr(config, "MAX_SCROLL_CYCLES", 15)
+        self.scroll_increment = getattr(config, "SCROLL_INCREMENT_STEP", 2)
+        self.settle_duration = getattr(config, "OSCILLATION_SETTLE_TIME", 0.5)
 
     def execute_cycle(self, 
                       check_priority: Callable, 
                       check_main_target: Callable, 
                       check_fallbacks: Optional[Callable] = None) -> Optional[Any]:
         """
-        Senior Algorithm Implementation: Arithmetic Progression Search Strategy.
-        Widens the search area each cycle (1, 3, 5, 7...) to prevent local traps.
+        The orchestrator for the widening search pattern.
+        Requirement: maintain exact logic flow (Baseline Scan -> Outer Cycles -> Interleaved Inner Loop).
         """
-        max_cycles = getattr(config, "MAX_SCROLL_CYCLES", 15)
-        increment = getattr(config, "SCROLL_INCREMENT_STEP", 2)
-        direction = 1  # 1 for Scroll Down (Drag UP), -1 for Scroll Up (Drag DOWN)
-        
-        logger.info(f"[Search] Starting Arithmetic Progression Search (Max Cycles: {max_cycles})")
+        logger.info(f"[Search] Initializing Interleaved Search (Limit: {self.max_cycles} cycles)")
 
-        for current_cycle in range(max_cycles):
-            # Calculate arithmetic progression: 1, 3, 5, 7, 9...
-            scrolls_to_perform = 1 + (current_cycle * increment)
-            logger.info(f"[Search] Cycle {current_cycle + 1}/{max_cycles}: performing {scrolls_to_perform} steps (Dir: {direction})")
+        # Baseline: Verify current area before moving
+        initial_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
+        if initial_hit:
+            return initial_hit
 
-            # --- INNER LOOP: Sequential Step-Scan ---
-            for step in range(scrolls_to_perform):
-                # INTERRUPT CHECK: Ensure immediate stop
-                if hasattr(self.bot, 'running') and not self.bot.running:
-                    logger.info("[Search] Interrupt detected; aborting search cycle")
-                    return None
-
-                # STEP A & B: Priority & Main Target Scan (The "Scan-First" Requirement)
-                priority_result = check_priority()
-                if priority_result:
-                    logger.info(f"[Search] Priority target found during cycle {current_cycle + 1}, step {step + 1}")
-                    return priority_result
-
-                main_result = check_main_target()
-                if main_result:
-                    logger.info(f"[Search] Main target acquired!")
-                    return main_result
-
-                # STEP C: Fallback Scan (Side Effects)
-                if check_fallbacks:
-                    check_fallbacks()
-
-                # STEP D: Mechanical Scroll
-                self.perform_scroll(direction)
-                
-                # STEP E: Settle Wait (Interval Pause)
-                # Requirement: Inside inner loop, strictly after scroll.
-                time.sleep(getattr(config, "SCROLL_INTERVAL_PAUSE", 0.5))
-
-            # --- CYCLE COMPLETION ---
-            # Requirement: CYCLE_PAUSE_DURATION after the sequence finishes.
-            logger.debug(f"[Search] Cycle {current_cycle + 1} sequence complete. Stabilizing...")
-            time.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.5))
+        search_direction = 1 # 1: Down (Drag UP), -1: Up (Drag DOWN)
+        for cycle_index in range(self.max_cycles):
+            # Arithmetic Progression Formula: 1, 3, 5, 7...
+            steps_in_cycle = 1 + (cycle_index * self.scroll_increment)
             
-            # Widen the area by flipping direction for the next (larger) cycle
-            direction *= -1
+            logger.info(f"[Search] Cycle {cycle_index + 1}: Executing {steps_in_cycle} steps")
 
-        logger.warning(f"[Search] Search strategy exhausted after {max_cycles} cycles.")
+            target_found = self._run_step_sequence(steps_in_cycle, search_direction, 
+                                                  check_priority, check_main_target, check_fallbacks)
+            if target_found:
+                return target_found
+
+            # Post-Sequence stabilization before reversing direction
+            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.5))
+            search_direction *= -1
+
+        logger.warning(f"[Search] Logic exhausted after {self.max_cycles} cycles.")
         return None
+
+    def _run_step_sequence(self, count: int, direction: int, p_check: Callable, m_check: Callable, f_check: Optional[Callable]) -> Optional[Any]:
+        """Executes a sequence of individual scroll-and-scan steps."""
+        for _ in range(count):
+            # Mechanical Guard: Check bot status before interaction
+            if not self.bot.running:
+                return None
+
+            # 1. Action
+            self.perform_scroll(direction)
+            
+            # 2. Wait (Stabilization)
+            self.bot.sleep(getattr(config, "SCROLL_INTERVAL_PAUSE", 0.4))
+
+            # 3. Scan
+            hit = self._perform_vision_pass(p_check, m_check, f_check)
+            if hit:
+                return hit
+        return None
+
+    def _perform_vision_pass(self, p_check: Callable, m_check: Callable, f_check: Optional[Callable]) -> Optional[Any]:
+        """Atomic vision check following the Priority -> Main -> Fallback protocol."""
+        priority_hit = p_check()
+        if priority_hit:
+            return priority_hit
+
+        main_hit = m_check()
+        if main_hit:
+            return main_hit
+
+        if f_check:
+            f_check()
+            
+        return None
+
+    def perform_scroll(self, direction: Any, distance_ratio: Optional[float] = None, duration: float = 0.5):
+        """Standardized mechanical drag interface."""
+        dir_int = self._map_direction(direction)
+        start_x, start_y = getattr(config, "SCROLL_START_POS", (812, 540))
+        
+        # Distance calculation
+        ratio = distance_ratio or getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
+        pixel_distance = int(getattr(config, "SCROLL_PIXEL_STEP", 150) * ratio)
+        end_y = start_y - (pixel_distance * dir_int)
+
+        self.bot.mouse_controller.drag(
+            start_x, start_y, start_x, end_y, 
+            duration=duration, relative=True,
+            interrupt_check=lambda: self.bot.check_critical_interrupts(raise_exception=False)
+        )
+        
+        if hasattr(self.bot, 'scroll_offset_units'):
+            self.bot.scroll_offset_units -= (ratio * dir_int)
+
+    def _map_direction(self, direction: Any) -> int:
+        """Standardizes input directions into integers (1 or -1)."""
+        if isinstance(direction, int): 
+            return direction
+        return {"DOWN": 1, "UP": -1}.get(str(direction).upper(), 1)
