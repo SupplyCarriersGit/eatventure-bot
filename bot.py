@@ -12,7 +12,6 @@ from state_machine import StateMachine, State
 from telegram_notifier import TelegramNotifier
 from asset_scanner import AssetScanner
 from search_utils import OscillatingSearcher
-from strict_vision import load_asset_profiles, verify_asset_strict
 import config
 
 logger = logging.getLogger(__name__)
@@ -621,7 +620,6 @@ class EatventureBot:
             "RedIcon13", "RedIcon14", "RedIcon15", "RedIconNoBG"
         ]
         self.templates = self.load_templates()
-        self.asset_profiles = load_asset_profiles(self.templates)
         self.available_red_icon_templates = self._build_available_red_icon_templates()
         self._red_template_hit_counts = {}
         self._red_template_priority = []
@@ -1735,78 +1733,76 @@ class EatventureBot:
         clicked_upgrade_station = False
         clicked_box = False
 
-        upgrade_profile = self.asset_profiles.get("upgradeStation")
-        if upgrade_profile is not None:
+        upgrade_template = self.templates.get("upgradeStation")
+        if upgrade_template is not None:
+            template, mask = upgrade_template
             upgrade_threshold = (
                 self.vision_optimizer.upgrade_station_threshold
                 if self.vision_optimizer.enabled
                 else config.UPGRADE_STATION_THRESHOLD
             )
-            verified = verify_asset_strict(
+            found, confidence, x, y = self.image_matcher.find_template(
                 screenshot,
-                upgrade_profile,
-                search_roi=(0, screenshot.shape[1], 250, config.MAX_SEARCH_Y),
-                template_threshold=upgrade_threshold,
+                template,
+                mask=mask,
+                threshold=upgrade_threshold,
+                template_name="upgradeStation-no-red-fallback",
+                check_color=config.UPGRADE_STATION_COLOR_CHECK,
             )
-            if verified:
-                x = verified["center_x"]
-                y = verified["center_y"]
+            if found:
                 if self.mouse_controller.is_in_forbidden_zone(x, y):
                     logger.debug("Fallback scan: upgrade station in forbidden zone, skipping")
                 else:
                     logger.info(
-                        "Fallback scan: clicking upgrade station at (%s, %s) [template=%.2f%%, shape=%.4f]",
+                        "Fallback scan: clicking upgrade station at (%s, %s) [%.2f%%]",
                         x,
                         y,
-                        verified["template_confidence"] * 100,
-                        verified["shape_score"],
+                        confidence * 100,
                     )
                     if self.mouse_controller.click(x, y, relative=True):
                         clicked_targets += 1
                         clicked_upgrade_station = True
                         self.upgrade_found_in_cycle = True
-                        self.vision_optimizer.update_upgrade_station_confidence(verified["template_confidence"])
+                        self.vision_optimizer.update_upgrade_station_confidence(confidence)
 
         for box_name in ("box1", "box2", "box3", "box4", "box5"):
-            box_profile = self.asset_profiles.get(box_name)
-            if box_profile is None:
+            box_template = self.templates.get(box_name)
+            if box_template is None:
                 continue
 
+            template, mask = box_template
             box_threshold = (
                 self.vision_optimizer.box_threshold
                 if self.vision_optimizer.enabled
                 else config.BOX_THRESHOLD
             )
-            verified = verify_asset_strict(
+            found, confidence, x, y = self.image_matcher.find_template(
                 screenshot,
-                box_profile,
-                search_roi=(0, screenshot.shape[1], 150, config.MAX_SEARCH_Y),
-                template_threshold=box_threshold,
+                template,
+                mask=mask,
+                threshold=box_threshold,
+                template_name=f"{box_name}-no-red-fallback",
             )
 
-            if not verified:
+            if not found:
                 self.vision_optimizer.update_box_miss()
                 continue
-
-            x = verified["center_x"]
-            y = verified["center_y"]
 
             if self.mouse_controller.is_in_forbidden_zone(x, y):
                 logger.debug("Fallback scan: %s in forbidden zone, skipping", box_name)
                 continue
 
             logger.info(
-                "Fallback scan: clicking %s at (%s, %s) [template=%.2f%%, shape=%.4f]",
+                "Fallback scan: clicking %s at (%s, %s) [%.2f%%]",
                 box_name,
                 x,
                 y,
-                verified["template_confidence"] * 100,
-                verified["shape_score"],
+                confidence * 100,
             )
             if self.mouse_controller.click(x, y, relative=True):
                 clicked_targets += 1
                 clicked_box = True
-                self.vision_optimizer.update_box_confidence(verified["template_confidence"])
+                self.vision_optimizer.update_box_confidence(confidence)
 
         if clicked_targets > 0:
             self._no_red_scroll_cycle_pending = True
@@ -2075,29 +2071,43 @@ class EatventureBot:
         
         for attempt in range(max_attempts):
             limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-
-            station_profile = self.asset_profiles.get("upgradeStation")
-            if station_profile is not None:
+            
+            if "upgradeStation" in self.templates:
+                template, mask = self.templates["upgradeStation"]
+                
                 current_threshold = base_threshold if attempt < config.UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER else relaxed_threshold
-                verified = verify_asset_strict(
-                    limited_screenshot,
-                    station_profile,
-                    search_roi=(0, limited_screenshot.shape[1], 250, config.MAX_SEARCH_Y),
-                    template_threshold=current_threshold,
+                
+                found, confidence, x, y = self.image_matcher.find_template(
+                    limited_screenshot, template, mask=mask,
+                    threshold=current_threshold, template_name="upgradeStation"
                 )
-
-                if verified:
-                    x = verified["center_x"]
-                    y = verified["center_y"]
+                
+                if found:
                     logger.info(f"✓ Upgrade station found (attempt {attempt + 1})")
-                    self.upgrade_station_pos = (x, y)
-                    self.vision_optimizer.update_upgrade_station_confidence(verified["template_confidence"])
-
+                    refined_pos, refined = self._refine_template_position(
+                        "upgradeStation",
+                        (x, y),
+                        config.UPGRADE_STATION_REFINE_RADIUS,
+                        screenshot=limited_screenshot,
+                        threshold=current_threshold,
+                        check_color=config.UPGRADE_STATION_COLOR_CHECK,
+                    )
+                    self.upgrade_station_pos = refined_pos
+                    if refined:
+                        logger.debug(
+                            "Refined upgrade station position: (%s, %s) -> (%s, %s)",
+                            x,
+                            y,
+                            refined_pos[0],
+                            refined_pos[1],
+                        )
+                    self.vision_optimizer.update_upgrade_station_confidence(confidence)
+                    
                     if self.current_red_icon_index < len(self.red_icons):
                         _, _, red_y = self.red_icons[self.current_red_icon_index]
                         if red_y not in self.successful_red_icon_positions:
                             self.successful_red_icon_positions.append(red_y)
-
+                    
                     self.upgrade_found_in_cycle = True
                     self.consecutive_failed_cycles = 0
                     self._last_upgrade_station_pos = self.upgrade_station_pos
@@ -2254,29 +2264,25 @@ class EatventureBot:
         boxes_found = 0
         
         for box_name in box_names:
-            box_profile = self.asset_profiles.get(box_name)
-            if box_profile is not None:
+            if box_name in self.templates:
+                template, mask = self.templates[box_name]
                 box_threshold = (
                     self.vision_optimizer.box_threshold
                     if self.vision_optimizer.enabled
                     else config.BOX_THRESHOLD
                 )
-                verified = verify_asset_strict(
-                    limited_screenshot,
-                    box_profile,
-                    search_roi=(0, limited_screenshot.shape[1], 150, config.MAX_SEARCH_Y),
-                    template_threshold=box_threshold,
+                found, confidence, x, y = self.image_matcher.find_template(
+                    limited_screenshot, template, mask=mask,
+                    threshold=box_threshold, template_name=box_name
                 )
-
-                if verified:
-                    x = verified["center_x"]
-                    y = verified["center_y"]
+                
+                if found:
                     if self.mouse_controller.is_in_forbidden_zone(x, y):
                         logger.debug(f"{box_name} in forbidden zone, skipping")
                     else:
                         self.mouse_controller.click(x, y, relative=True)
                         boxes_found += 1
-                        self.vision_optimizer.update_box_confidence(verified["template_confidence"])
+                        self.vision_optimizer.update_box_confidence(confidence)
                 else:
                     self.vision_optimizer.update_box_miss()
         
