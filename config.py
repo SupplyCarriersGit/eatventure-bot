@@ -119,6 +119,7 @@ SCROLL_DISTANCE_RATIO = 1  # Default multiplier for non-incremental scrolls
 MAX_SCROLL_CYCLES = 15      # Maximum widening steps before resetting
 SCROLL_INCREMENT_STEP = 1   # Number of scrolls to add per cycle
 SCROLL_INTERVAL_PAUSE = 0.3 # Time to let UI settle after EACH individual scroll
+POST_SCROLL_SETTLE = 0.3  # Mandatory post-swipe settle before intra-loop red icon interrupt scan
 CYCLE_PAUSE_DURATION = 0.3  # Wait after a full sequence finishes
 
 # Visual smoothness and stability

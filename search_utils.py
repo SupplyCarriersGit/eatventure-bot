@@ -60,11 +60,16 @@ class OscillatingSearcher:
 
             # 1. Action
             self.perform_scroll(direction)
-            
-            # 2. Wait (Stabilization)
-            self.bot.sleep(getattr(config, "SCROLL_INTERVAL_PAUSE", 0.4))
 
-            # 3. Scan
+            # 2. Mandatory settle after each swipe before any CV checks
+            time.sleep(config.POST_SCROLL_SETTLE)
+
+            # 3. Intra-loop vision interrupt (targeted red-icon scan)
+            red_interrupt = self.bot.check_intra_scroll_red_interrupt()
+            if red_interrupt:
+                return red_interrupt
+
+            # 4. Standard layered scan pipeline
             hit = self._perform_vision_pass(p_check, m_check, f_check)
             if hit:
                 return hit

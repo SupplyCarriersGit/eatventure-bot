@@ -1645,6 +1645,47 @@ class EatventureBot:
                 return State.CLICK_RED_ICON
         return None
 
+    def check_intra_scroll_red_interrupt(self):
+        """
+        Targeted intra-loop red icon interrupt scan.
+        Runs between individual scroll intervals and hard-interrupts to CLICK_RED_ICON
+        as soon as a safe actionable icon is detected.
+        """
+        self.check_critical_interrupts()
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        red_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
+        red_icons = self._stable_red_icons(red_icons)
+
+        if not red_icons:
+            return None
+
+        prioritized_icons = self._prioritize_red_icons(red_icons)
+        actionable_icons = []
+        for confidence, x, y, *_ in prioritized_icons:
+            click_x = x + config.RED_ICON_OFFSET_X
+            click_y = y + config.RED_ICON_OFFSET_Y
+
+            if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
+                continue
+
+            if not self._is_red_icon_present_at(x, y, screenshot=screenshot):
+                continue
+
+            actionable_icons.append((confidence, x, y))
+
+        if not actionable_icons:
+            return None
+
+        self.red_icons = actionable_icons
+        self.current_red_icon_index = 0
+        self.work_done = True
+        logger.info(
+            "[ScrollInterrupt] Safe red icon detected intra-loop at (%s, %s); aborting remaining swipes",
+            actionable_icons[0][1],
+            actionable_icons[0][2],
+        )
+        return State.CLICK_RED_ICON
+
     def check_main_success(self):
         """STEP B: Main Target Scan. Reserved for specific success conditions."""
         self.check_critical_interrupts()
