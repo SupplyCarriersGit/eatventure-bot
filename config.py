@@ -337,33 +337,43 @@ TELEGRAM_CHAT_ID = "770506304"
 
 # Zones prevent the bot from clicking on critical UI elements
 # Each zone is defined by name and bounding box (min/max X and Y)
+# Optional field: "coordinate_space"
+# - "image" (default): x/y are relative to emulator client area (same space as template matching output)
+# - "monitor": x/y are absolute desktop coordinates
 FORBIDDEN_ZONES = [
     {
         "name": "General bottom bar",
+        "coordinate_space": "image",
         "x_min": 60, "x_max": 280, "y_min": 668, "y_max": 1000
     },
     {
         "name": "Zone 1: Right side menu area",
+        "coordinate_space": "image",
         "x_min": 290, "x_max": 350, "y_min": 93, "y_max": 320
     },
     {
         "name": "Zone 2: Left side top menu area",
+        "coordinate_space": "image",
         "x_min": 0, "x_max": 60, "y_min": 50, "y_max": 280
     },
     {
         "name": "Zone 3: Left side bottom menu area",
+        "coordinate_space": "image",
         "x_min": 0, "x_max": 60, "y_min": 590, "y_max": 667
     },
     {
         "name": "Zone 4: Top center notification area",
+        "coordinate_space": "image",
         "x_min": 145, "x_max": 200, "y_min": 65, "y_max": 110
     },
     {
         "name": "Zone 5: Bottom navigation bar",
+        "coordinate_space": "image",
         "x_min": 55, "x_max": 285, "y_min": 660, "y_max": 725
     },
     {
         "name": "Zone 6: Top bar area",
+        "coordinate_space": "image",
         "x_min": 0, "x_max": 360, "y_min": 0, "y_max": 70
     }
 ]
