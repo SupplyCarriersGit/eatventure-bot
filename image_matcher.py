@@ -83,6 +83,19 @@ class ImageMatcher:
             template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
         
         return template, mask
+
+    @staticmethod
+    def _match_top_left_to_center(top_left_x, top_left_y, width, height):
+        """
+        Convert cv2.matchTemplate top-left coordinates into a true center point.
+        Math:
+            center_x = top_left_x + (width / 2.0)
+            center_y = top_left_y + (height / 2.0)
+        Rounded to nearest integer pixel for click targeting.
+        """
+        center_x = int(round(float(top_left_x) + (float(width) / 2.0)))
+        center_y = int(round(float(top_left_y) + (float(height) / 2.0)))
+        return center_x, center_y
     
     def find_template(self, screenshot, template, mask=None, threshold=None, template_name="Unknown", check_color=False):
         thresh = threshold if threshold else self.threshold
@@ -99,8 +112,7 @@ class ImageMatcher:
         
         if confidence >= thresh:
             h, w = template.shape[:2]
-            center_x = min_loc[0] + w // 2
-            center_y = min_loc[1] + h // 2
+            center_x, center_y = self._match_top_left_to_center(min_loc[0], min_loc[1], w, h)
             
             if check_color:
                 color_match = self._check_color_similarity(screenshot, template, min_loc, mask)
@@ -187,8 +199,7 @@ class ImageMatcher:
 
             h, w = scaled_template.shape[:2]
             for confidence, match_x, match_y in fast_matches:
-                center_x = match_x + w // 2
-                center_y = match_y + h // 2
+                center_x, center_y = self._match_top_left_to_center(match_x, match_y, w, h)
                 all_matches.append((confidence, center_x, center_y, w, h))
         
         if all_matches:

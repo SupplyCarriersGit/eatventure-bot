@@ -36,18 +36,45 @@ class MouseController:
             time.sleep(duration)
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
-        if relative:
-            if check_forbidden and self.is_in_forbidden_zone(x, y):
-                return None
+        screen_x, screen_y = self._translate_to_monitor_space(x, y, relative=relative)
 
-            win_x, win_y = self.get_window_position()
-            screen_x = win_x + x
-            screen_y = win_y + y
-        else:
-            screen_x = x
-            screen_y = y
+        if check_forbidden and not self.is_safe_to_click(screen_x, screen_y, relative=False):
+            return None
 
         return self._clamp_to_screen(int(screen_x), int(screen_y))
+
+    def _translate_to_monitor_space(self, x, y, relative=True):
+        if relative:
+            win_x, win_y = self.get_window_position()
+            return float(win_x) + float(x), float(win_y) + float(y)
+        return float(x), float(y)
+
+    def _zone_to_monitor_space(self, zone, window_origin):
+        coord_space = str(zone.get("coordinate_space", "image")).lower()
+        x_min = float(zone["x_min"])
+        x_max = float(zone["x_max"])
+        y_min = float(zone["y_min"])
+        y_max = float(zone["y_max"])
+
+        if coord_space in {"image", "window", "relative"}:
+            win_x, win_y = window_origin
+            return (
+                x_min + float(win_x),
+                x_max + float(win_x),
+                y_min + float(win_y),
+                y_max + float(win_y),
+            )
+
+        if coord_space in {"monitor", "screen", "absolute"}:
+            return x_min, x_max, y_min, y_max
+
+        logger.warning(
+            "Unknown coordinate_space '%s' for forbidden zone '%s'; assuming image space",
+            coord_space,
+            zone.get("name", "unnamed"),
+        )
+        win_x, win_y = window_origin
+        return x_min + float(win_x), x_max + float(win_x), y_min + float(win_y), y_max + float(win_y)
 
     def _clamp_to_screen(self, screen_x, screen_y):
         width = max(1, win32api.GetSystemMetrics(0))
@@ -237,13 +264,30 @@ class MouseController:
             if check_interval > 0:
                 self._sleep(check_interval)
     
-    def is_in_forbidden_zone(self, x, y):
+    def is_safe_to_click(self, x, y, relative=True):
+        """
+        Coordinate Gatekeeper.
+        Uses monitor-space collision checks with explicit inclusive bounds:
+            if (zone_x1 <= target_center_x <= zone_x2) and (zone_y1 <= target_center_y <= zone_y2):
+                return False
+        """
+        target_center_x, target_center_y = self._translate_to_monitor_space(x, y, relative=relative)
+        window_origin = self.get_window_position()
+
         for zone in getattr(config, "FORBIDDEN_ZONES", []):
-            if (zone["y_min"] <= y <= zone["y_max"] and
-                zone["x_min"] <= x <= zone["x_max"]):
-                logger.warning(f"Coordinates ({x}, {y}) blocked - {zone['name']}")
-                return True
-        return False
+            zone_x1, zone_x2, zone_y1, zone_y2 = self._zone_to_monitor_space(zone, window_origin)
+            if (zone_x1 <= target_center_x <= zone_x2) and (zone_y1 <= target_center_y <= zone_y2):
+                logger.warning(
+                    "Coordinates (%s, %s) blocked by forbidden zone '%s' in monitor space",
+                    int(round(target_center_x)),
+                    int(round(target_center_y)),
+                    zone.get("name", "unnamed"),
+                )
+                return False
+        return True
+
+    def is_in_forbidden_zone(self, x, y, relative=True):
+        return not self.is_safe_to_click(x, y, relative=relative)
     
     def get_window_position(self):
         x, y = win32gui.ClientToScreen(self.hwnd, (0, 0))
