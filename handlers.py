@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Optional, Callable
 import config
+from strict_vision import verify_asset_strict
 
 logger = logging.getLogger(__name__)
 
@@ -231,41 +232,79 @@ class RedIconHandler(BaseHandler):
 
 class UpgradeStationHandler(BaseHandler):
     """Isolated module for Upgrade Station processing."""
+
     def process(self, screenshot: np.ndarray):
-        # Upgrade stations are usually in the lower half
-        search_roi = (0, screenshot.shape[1], 250, getattr(config, "MAX_SEARCH_Y", 660))
-        x1, x2, y1, y2 = search_roi
-        roi = screenshot[y1:y2, x1:x2]
-        
-        # Use existing bot logic to find candidates but wrap in strict verification
-        stations = self.bot._find_upgrade_stations(roi)
-        for conf, rel_x, rel_y in stations:
-            abs_x, abs_y = rel_x + x1, rel_y + y1
-            
-            if self.verify_bgr_match(screenshot, abs_x, abs_y, "upgradeStation"):
-                logger.info(f"[UpgradeStation] Whitelist Verified at ({abs_x}, {abs_y})")
-                if self.bot.mouse_controller.click(abs_x, abs_y, relative=True):
-                    return True
-        return False
+        # Strict 3-stage verification only. No single-stage candidate prefilter.
+        profile = getattr(self.bot, "asset_profiles", {}).get("upgradeStation")
+        if profile is None:
+            logger.debug("[UpgradeStation] Missing strict profile, skipping")
+            return False
+
+        verified = verify_asset_strict(
+            screenshot,
+            profile,
+            search_roi=(0, screenshot.shape[1], 250, getattr(config, "MAX_SEARCH_Y", 660)),
+            template_threshold=(
+                self.bot.vision_optimizer.upgrade_station_threshold
+                if self.bot.vision_optimizer.enabled
+                else getattr(config, "UPGRADE_STATION_THRESHOLD", 0.92)
+            ),
+        )
+        if not verified:
+            return False
+
+        center_x = verified["center_x"]
+        center_y = verified["center_y"]
+        logger.info(
+            "[UpgradeStation] Strict Verified at (%s, %s) [template=%.2f%%, shape=%.4f]",
+            center_x,
+            center_y,
+            verified["template_confidence"] * 100,
+            verified["shape_score"],
+        )
+        return self.bot.mouse_controller.click(center_x, center_y, relative=True)
 
 class BoxHandler(BaseHandler):
     """Isolated module for Box processing."""
+
     def process(self, screenshot: np.ndarray):
-        # Boxes appear anywhere in the middle
+        # Boxes must pass strict 3-stage verification against all five box profiles.
         search_roi = (0, screenshot.shape[1], 150, getattr(config, "MAX_SEARCH_Y", 660))
-        x1, x2, y1, y2 = search_roi
-        roi = screenshot[y1:y2, x1:x2]
-        
-        boxes = self.bot._find_boxes(roi)
-        for conf, rel_x, rel_y in boxes:
-            abs_x, abs_y = rel_x + x1, rel_y + y1
-            
-            # Whitelist verification against all box variations
-            for i in range(1, 6):
-                if self.verify_bgr_match(screenshot, abs_x, abs_y, f"box{i}"):
-                    logger.info(f"[Box] Whitelist Verified: box{i} at ({abs_x}, {abs_y})")
-                    if self.bot.mouse_controller.click(abs_x, abs_y, relative=True):
-                        return True
-                    break
-        return False
+        best = None
+
+        for i in range(1, 6):
+            profile = getattr(self.bot, "asset_profiles", {}).get(f"box{i}")
+            if profile is None:
+                continue
+
+            verified = verify_asset_strict(
+                screenshot,
+                profile,
+                search_roi=search_roi,
+                template_threshold=(
+                    self.bot.vision_optimizer.box_threshold
+                    if self.bot.vision_optimizer.enabled
+                    else getattr(config, "BOX_THRESHOLD", 0.97)
+                ),
+            )
+            if not verified:
+                continue
+
+            if best is None or verified["template_confidence"] > best["template_confidence"]:
+                best = verified
+
+        if best is None:
+            return False
+
+        center_x = best["center_x"]
+        center_y = best["center_y"]
+        logger.info(
+            "[Box] Strict Verified: %s at (%s, %s) [template=%.2f%%, shape=%.4f]",
+            best["asset_name"],
+            center_x,
+            center_y,
+            best["template_confidence"] * 100,
+            best["shape_score"],
+        )
+        return self.bot.mouse_controller.click(center_x, center_y, relative=True)
 

@@ -1,47 +1,60 @@
 # Phase 1 Diagnostic Report: Strict Cascade Integration Plan
 
-## Current single-stage detection surface (before refactor)
+## Holistic audit (vision utilities + handlers + FSM routing)
 
-### 1) Fallback non-red scan path
-- `EatventureBot._scan_and_click_non_red_assets()` used direct `image_matcher.find_template()` on:
-  - `upgradeStation`
-  - `box1`..`box5`
-- This path used a single match-template confidence gate and then clicked if `is_in_forbidden_zone()` passed.
+### Vision utilities before refactor
+1. `image_matcher.find_template()` was the primary single-stage detector for boxes/stations.
+2. `handlers.BaseHandler.verify_bgr_match()` was a local whitelist check, but still template-only and not a true 3-stage geometric funnel.
+3. `bot.py` fallback and state handlers also used direct template matching for box/station actions.
 
-### 2) Upgrade station FSM path
-- `EatventureBot.handle_search_upgrade_station()` previously used direct `find_template()` and optional positional refine.
-- False positives in blue-ish environment could pass this single-stage check.
+### Handler layer before refactor
+- `UpgradeStationHandler.process()` consumed candidate points from `self.bot._find_upgrade_stations(...)`, then called `verify_bgr_match(...)`.
+- `BoxHandler.process()` consumed `self.bot._find_boxes(...)`, then looped `verify_bgr_match` over `box1..box5`.
+- Net effect: candidate generation + verification both remained template-centric and vulnerable to environment lookalikes.
 
-### 3) Box opening FSM path
-- `EatventureBot.handle_open_boxes()` previously used direct `find_template()` loop across `box1`..`box5`.
-- Floor-like brown textures could satisfy correlation and trigger bad clicks.
+### FSM routing and click gatekeeper audit
+- Hub-and-spoke FSM transitions are controlled in `bot.py` state handlers and `state_machine.py`.
+- Coordinate safety is enforced by mouse click resolution via `mouse_controller.is_safe_to_click(...)` / forbidden zones.
+- Required invariants to preserve:
+  - Do not alter state transition graph.
+  - Do not alter hold/paging mechanics.
+  - Do not bypass safe-click gatekeeper.
 
-## FSM and gatekeeper constraints audited
-- Routing preserved: no state enum, transition ordering, or route priorities were changed.
-- Persistent counters/hold flow preserved:
-  - `cycle_counter`, `consecutive_failed_cycles`, `upgrade_found_in_cycle`
-  - Hold loop and upgrade mechanics remain in existing handlers.
-- Coordinate gatekeeper preserved:
-  - Every click in the modified paths still requires `self.mouse_controller.is_in_forbidden_zone(...) == False`.
+## Exact rip-out and injection map
 
-## New injection points (strict funnel)
+### Rip-out targets (single-stage logic)
+1. `handlers.py`:
+   - `UpgradeStationHandler.process()` old `_find_upgrade_stations + verify_bgr_match` flow.
+   - `BoxHandler.process()` old `_find_boxes + verify_bgr_match` flow.
+2. `bot.py`:
+   - `_scan_and_click_non_red_assets()` old direct template matching.
+   - `handle_search_upgrade_station()` old direct template matching.
+   - `handle_open_boxes()` old direct template matching.
 
-### Profile load injection (init-time)
-- Added one-time profile build in `EatventureBot.__init__`:
-  - `self.asset_profiles = load_asset_profiles(self.templates)`
-- Purpose:
-  - Store template image (Stage 3)
-  - Store canonical contour profile (Stage 2)
+### Injection points (strict funnel)
+1. Init-time profile load (once):
+   - `self.asset_profiles = load_asset_profiles(self.templates)` in bot initialization.
+2. Runtime strict verifier:
+   - `verify_asset_strict(...)` now drives all box/station clicks in the above paths.
+3. Handler integration requirement:
+   - `UpgradeStationHandler` and `BoxHandler` now exclusively use strict verification.
 
-### Runtime verifier injection
-- Replaced single-stage matching with `verify_asset_strict(...)` in:
-  1. `_scan_and_click_non_red_assets()` (fallback path)
-  2. `handle_search_upgrade_station()` (station acquisition path)
-  3. `handle_open_boxes()` (box opening path)
+## Three-stage cascade design contract
+1. **Stage 1: Pixel/Color Gate**
+   - `cv2.inRange` with strict BGR bounds (asset class specific).
+   - Empty mask => hard fail.
+2. **Stage 2: Contour/Shape Gate**
+   - `cv2.findContours` on Stage-1 mask.
+   - Bounding-box area filters remove floor/water mega-contours and micro-noise.
+   - `cv2.matchShapes` compares candidates with loaded profile contour.
+   - No geometric match => hard fail.
+3. **Stage 3: Template Gate**
+   - Crop the Stage-2-passed local ROI as a square candidate window.
+   - Run `cv2.matchTemplate` against loaded asset image.
+   - Confidence below threshold => hard fail.
+   - Otherwise return monitor-click payload center.
 
-## Three-stage enforcement behavior
-1. Stage 1: strict BGR inRange mask for asset-specific color family.
-2. Stage 2: contour extraction + area filtering + `cv2.matchShapes` vs loaded profile contour.
-3. Stage 3: template correlation on Stage-2 ROI crop; only returns payload if threshold is met.
-
-No click is emitted unless all three stages pass sequentially.
+## Reliability notes
+- The funnel is intentionally conservative and sequential.
+- Click authorization requires all three gates in order.
+- FSM routing, scroll counters, hold mechanics, and safe-click gatekeeper remain untouched.

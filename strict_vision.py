@@ -162,30 +162,55 @@ def verify_asset_strict(
     )
 
     best_payload = None
+    template = profile.template
+    th, tw = template.shape[:2]
+
     for shape_score, bx, by, bw, bh in sorted(candidate_boxes, key=lambda item: item[0]):
-        crop = roi[by : by + bh, bx : bx + bw]
-        if crop.size == 0:
+        # Stage-3 requirement: use the exact Stage-2 contour ROI, converted to a square crop
+        # around the detected geometry center. This preserves local context and avoids full-frame
+        # template matching that can drift into environmental false positives.
+        cx = bx + (bw // 2)
+        cy = by + (bh // 2)
+        side = max(bw, bh)
+        half = side // 2
+
+        sx1 = max(0, cx - half)
+        sy1 = max(0, cy - half)
+        sx2 = min(roi.shape[1], sx1 + side)
+        sy2 = min(roi.shape[0], sy1 + side)
+        square_crop = roi[sy1:sy2, sx1:sx2]
+        if square_crop.size == 0:
             continue
 
-        # Normalize Stage-2 crop to template size so matchTemplate can compare internal structure.
-        template = profile.template
-        resized_crop = cv2.resize(crop, (template.shape[1], template.shape[0]), interpolation=cv2.INTER_AREA)
-        tm_result = cv2.matchTemplate(resized_crop, template, cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, _ = cv2.minMaxLoc(tm_result)
+        # matchTemplate requires the search image to be >= template size.
+        # If needed, pad the candidate square (edge-replicated) so we can still perform
+        # template verification without changing Stage-2 localization.
+        ch, cw = square_crop.shape[:2]
+        if ch < th or cw < tw:
+            pad_y = max(0, th - ch)
+            pad_x = max(0, tw - cw)
+            top = pad_y // 2
+            bottom = pad_y - top
+            left = pad_x // 2
+            right = pad_x - left
+            square_crop = cv2.copyMakeBorder(square_crop, top, bottom, left, right, cv2.BORDER_REPLICATE)
+
+        tm_result = cv2.matchTemplate(square_crop, template, cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, max_loc = cv2.minMaxLoc(tm_result)
 
         if confidence < threshold:
             continue
 
-        abs_x1 = x1 + bx
-        abs_y1 = y1 + by
-        center_x = abs_x1 + (bw // 2)
-        center_y = abs_y1 + (bh // 2)
+        abs_x1 = x1 + sx1 + int(max_loc[0])
+        abs_y1 = y1 + sy1 + int(max_loc[1])
+        center_x = abs_x1 + (tw // 2)
+        center_y = abs_y1 + (th // 2)
 
         payload = {
             "asset_name": profile.name,
             "center_x": int(center_x),
             "center_y": int(center_y),
-            "bbox": (int(abs_x1), int(abs_y1), int(bw), int(bh)),
+            "bbox": (int(abs_x1), int(abs_y1), int(tw), int(th)),
             "template_confidence": float(confidence),
             "shape_score": float(shape_score),
         }
