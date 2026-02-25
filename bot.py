@@ -853,9 +853,7 @@ class EatventureBot:
         if pre_delay > 0:
             self.sleep(pre_delay)
 
-        # Always re-validate on a fresh frame after pre-delay.
-        # The caller may provide a screenshot from initial detection, but that frame can be stale.
-        frame = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        frame = screenshot if screenshot is not None else self._capture(max_y=config.MAX_SEARCH_Y, force=True)
 
         if asset_type == "red_icon":
             icon_x = x - config.RED_ICON_OFFSET_X
@@ -893,22 +891,10 @@ class EatventureBot:
 
         template, mask = template_data
         height, width = screenshot.shape[:2]
-        template_h, template_w = template.shape[:2]
-
-        # Ensure ROI can fit the template dimensions.
-        # This prevents false-negative verification when templates are larger than radius*2 windows.
-        half_w = max(int(radius), int(template_w // 2) + 2)
-        half_h = max(int(radius), int(template_h // 2) + 2)
-
-        x1 = max(0, int(x - half_w))
-        y1 = max(0, int(y - half_h))
-        x2 = min(width, int(x + half_w))
-        y2 = min(height, int(y + half_h))
-
-        if (x2 - x1) < template_w or (y2 - y1) < template_h:
-            # If edge-clamped ROI still cannot contain template, verify against full frame.
-            x1, y1, x2, y2 = 0, 0, width, height
-
+        x1 = max(0, int(x - radius))
+        y1 = max(0, int(y - radius))
+        x2 = min(width, int(x + radius))
+        y2 = min(height, int(y + radius))
         roi = screenshot[y1:y2, x1:x2]
         if roi.size == 0:
             return False
@@ -926,7 +912,7 @@ class EatventureBot:
 
         abs_x = local_x + x1
         abs_y = local_y + y1
-        tolerance = max(4, int(radius // 2), int(min(template_w, template_h) * 0.1))
+        tolerance = max(4, int(radius // 2))
         return abs(abs_x - x) <= tolerance and abs(abs_y - y) <= tolerance
 
     def _verify_any_box_presence(self, x, y, screenshot, threshold):
