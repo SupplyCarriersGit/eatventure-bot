@@ -825,16 +825,23 @@ class EatventureBot:
         return clicked
 
     def _scroll_away_from_forbidden_zone(self, y_position):
-        # Disabled intentionally.
-        #
-        # One-Scroll Rule: all scrolling must be performed only by
-        # execute_oscillating_search(). Forbidden-zone handling now skips the
-        # blocked icon instead of performing an ad-hoc directional scroll.
-        logger.info(
-            "Red icon in forbidden zone at y=%s; skipping icon (ad-hoc forbidden-zone scrolling disabled)",
+        # One-Scroll Rule retained: do not execute manual directional drags here.
+        # Instead, redirect the FSM into the canonical oscillating search cycle.
+        logger.warning(
+            "Red icon in forbidden zone at y=%s; redirecting to Main Loop Scroll (Oscillating Search)",
             y_position,
         )
-        return False
+        now = time.monotonic()
+        cooldown = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN", 0.0)))
+        wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
+        if wait_remaining > 0:
+            logger.debug(
+                "Applying forbidden-zone scroll redirect cooldown %.3fs",
+                wait_remaining,
+            )
+            self._sleep_with_interrupt(wait_remaining)
+        self._last_forbidden_scroll_time = time.monotonic()
+        return True
 
     def resolve_priority_state(self, current_state):
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
@@ -2105,7 +2112,7 @@ class EatventureBot:
         if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
             if self._scroll_away_from_forbidden_zone(click_y):
-                return State.FIND_RED_ICONS
+                return State.SCROLL
             
             if self._new_level_event.is_set():
                 return State.TRANSITION_LEVEL
@@ -2117,6 +2124,19 @@ class EatventureBot:
         click_success = self.mouse_controller.click(click_x, click_y, relative=True)
         self.tuner.record_click_result(click_success)
         self._apply_tuning()
+
+        if not click_success:
+            if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
+                logger.warning(
+                    "Red icon click canceled by strict pre-click validator at (%s, %s); redirecting to oscillating search",
+                    click_x,
+                    click_y,
+                )
+                if self._scroll_away_from_forbidden_zone(click_y):
+                    return State.SCROLL
+
+            self.current_red_icon_index += 1
+            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
         
         self.red_icon_cycle_count = 0
         return State.CHECK_UNLOCK

@@ -38,7 +38,7 @@ class MouseController:
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         screen_x, screen_y = self._translate_to_monitor_space(x, y, relative=relative)
 
-        if check_forbidden and not self.is_safe_to_click(screen_x, screen_y, relative=False):
+        if check_forbidden and not self._validate_pre_click_target(screen_x, screen_y):
             return None
 
         return self._clamp_to_screen(int(screen_x), int(screen_y))
@@ -92,6 +92,14 @@ class MouseController:
         return clamped_x, clamped_y
 
     def _send_click(self, screen_x, screen_y, down_up_delay=None):
+        if not self._validate_pre_click_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked click dispatch at (%s, %s): forbidden-zone pre-check failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+
         retries = max(1, int(getattr(config, "MOUSE_CLICK_RETRY_COUNT", 1)))
         settle_retry_delay = max(0.0, float(getattr(config, "MOUSE_CLICK_RETRY_SETTLE_DELAY", 0.0)))
 
@@ -115,12 +123,30 @@ class MouseController:
                 self._sleep(settle_retry_delay)
 
         self._ensure_min_click_interval()
+
+        if not self._validate_pre_click_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked click dispatch at (%s, %s): forbidden-zone final gate failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
         self._sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
         self._last_click_time = time.monotonic()
+        return True
 
     def _send_mouse_down(self, screen_x, screen_y):
+        if not self._validate_pre_click_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked mouse-down dispatch at (%s, %s): forbidden-zone pre-check failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+
         travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
 
         if self._should_move_cursor(screen_x, screen_y):
@@ -130,7 +156,17 @@ class MouseController:
         self._correct_cursor_position(screen_x, screen_y)
         self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
         self._ensure_min_click_interval()
+
+        if not self._validate_pre_click_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked mouse-down dispatch at (%s, %s): forbidden-zone final gate failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
+        return True
 
     def _send_mouse_up(self, screen_x, screen_y):
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
@@ -276,6 +312,8 @@ class MouseController:
 
         for zone in getattr(config, "FORBIDDEN_ZONES", []):
             zone_x1, zone_x2, zone_y1, zone_y2 = self._zone_to_monitor_space(zone, window_origin)
+            zone_x1, zone_x2 = sorted((zone_x1, zone_x2))
+            zone_y1, zone_y2 = sorted((zone_y1, zone_y2))
             if (zone_x1 <= target_center_x <= zone_x2) and (zone_y1 <= target_center_y <= zone_y2):
                 logger.warning(
                     "Coordinates (%s, %s) blocked by forbidden zone '%s' in monitor space",
@@ -285,6 +323,28 @@ class MouseController:
                 )
                 return False
         return True
+
+    def _validate_pre_click_target(self, screen_x, screen_y):
+        validation_delay = max(
+            0.0,
+            float(getattr(config, "FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY", 0.0)),
+        )
+        double_check_delay = max(
+            0.0,
+            float(getattr(config, "FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY", 0.0)),
+        )
+
+        if validation_delay > 0:
+            self._sleep(validation_delay)
+
+        first_check = self.is_safe_to_click(screen_x, screen_y, relative=False)
+        if not first_check:
+            return False
+
+        if double_check_delay > 0:
+            self._sleep(double_check_delay)
+
+        return self.is_safe_to_click(screen_x, screen_y, relative=False)
 
     def is_in_forbidden_zone(self, x, y, relative=True):
         return not self.is_safe_to_click(x, y, relative=relative)
@@ -319,7 +379,11 @@ class MouseController:
                 return False
 
             screen_x, screen_y = screen_pos
-            self._send_click(screen_x, screen_y)
+            click_sent = self._send_click(screen_x, screen_y)
+            if not click_sent:
+                if wait_after:
+                    self._sleep(self.click_delay if delay is None else delay)
+                return False
 
             logger.info(f"Clicked at ({screen_x}, {screen_y})")
 
@@ -335,7 +399,8 @@ class MouseController:
                 return False
 
             screen_x, screen_y = screen_pos
-            self._send_mouse_down(screen_x, screen_y)
+            if not self._send_mouse_down(screen_x, screen_y):
+                return False
             self._last_cursor_pos = (screen_x, screen_y)
             logger.info(f"Mouse down at ({screen_x}, {screen_y})")
             return True
