@@ -680,6 +680,7 @@ class EatventureBot:
         self._state_last_run_at = {}
         self._recent_red_icon_history = []
         self._no_red_scroll_cycle_pending = False
+        self._last_forbidden_scroll_time = 0.0
 
         self.forbidden_zones = [
             (zone["x_min"], zone["x_max"], zone["y_min"], zone["y_max"])
@@ -1940,38 +1941,126 @@ class EatventureBot:
         self.check_critical_interrupts()
         self._click_idle()
 
-        # Step 1: Discovery Pipeline (Decomposed)
-        actionable_icons, obscured_count = self._get_filtered_target_data()
+        # Step 1: Discovery pipeline with debounced zone-state arbitration.
+        zone_state = self._resolve_red_icon_zone_state()
+        safe_present = zone_state["safe_present"]
+        forbidden_present = zone_state["forbidden_present"]
+        actionable_icons = zone_state["actionable_icons"]
 
-        # STEP 2: Scenario A - Valid Targets Found
-        if actionable_icons:
-            logger.info(f"✓ {len(actionable_icons)} valid targets in safe zone.")
+        logger.info(
+            "Red icon zone-state matrix => safe=%s forbidden=%s (safe_icons=%s forbidden_icons=%s)",
+            int(safe_present),
+            int(forbidden_present),
+            len(actionable_icons),
+            zone_state["forbidden_count"],
+        )
+
+        # 4-state logic matrix:
+        # 1) safe=1, forbidden=1 => proceed to main loop cycle
+        # 2) safe=0, forbidden=1 => oscillating scroll cycle
+        # 3) safe=1, forbidden=0 => proceed to main loop cycle
+        # 4) safe=0, forbidden=0 => proceed to main loop cycle
+        if safe_present:
+            logger.info("✓ %s valid targets in safe zone.", len(actionable_icons))
             self.red_icons = self._prioritize_red_icons(actionable_icons)
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
             self.work_done = True
             return State.CLICK_RED_ICON
 
-        # STEP 3: Scenario B - Obscured Targets Exist
-        if obscured_count > 0:
-            logger.warning(f"⚠ {obscured_count} targets obscured by Forbidden Zone. Scrolling to free.")
+        if forbidden_present:
+            now = time.monotonic()
+            cooldown = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN", 0.0)))
+            wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
+            if wait_remaining > 0:
+                logger.debug(
+                    "Forbidden-only state detected; applying scroll reentry cooldown %.3fs",
+                    wait_remaining,
+                )
+                self._sleep_with_interrupt(wait_remaining)
+            self._last_forbidden_scroll_time = time.monotonic()
+            logger.warning(
+                "⚠ %s targets currently inside Forbidden Zone with no safe counterpart. "
+                "Switching to oscillating search cycle.",
+                zone_state["forbidden_count"],
+            )
             return State.SCROLL
 
-        # STEP 4: Scenario C - No Targets (Fallback scan then search)
+        # STEP 4: No targets (Fallback scan then search)
         self.check_fallbacks()
         logger.info("No targets detected; initiating exploration.")
         return State.SCROLL
 
-    def _get_filtered_target_data(self):
-        """Decomposed responsibility: Pipeline for fetching and filtering icons."""
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        
-        # 1. Capture & Debounce
+    def _collect_red_icon_zone_snapshot(self):
+        """Collect a single red-icon snapshot and split safe/forbidden detections."""
+        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
         raw_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
         stable_icons = self._stable_red_icons(raw_icons)
-        
-        # 2. Filter by Forbidden Zone
-        return self._filter_forbidden_red_icons(stable_icons)
+        safe_icons, forbidden_count = self._filter_forbidden_red_icons(stable_icons)
+        return {
+            "safe_icons": safe_icons,
+            "safe_count": len(safe_icons),
+            "forbidden_count": forbidden_count,
+            "safe_present": len(safe_icons) > 0,
+            "forbidden_present": forbidden_count > 0,
+        }
+
+    def _resolve_red_icon_zone_state(self):
+        """Debounced 4-state arbitration for safe-vs-forbidden red icon handling."""
+        pre_delay = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_DETECTION_PRE_DELAY", 0.0)))
+        post_delay = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_DETECTION_POST_DELAY", 0.0)))
+        ticks = max(1, int(getattr(config, "FORBIDDEN_ZONE_DEBOUNCE_TICKS", 1)))
+        required_consensus = max(
+            1,
+            min(
+                ticks,
+                int(getattr(config, "FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS", ticks)),
+            ),
+        )
+
+        if pre_delay > 0:
+            self._sleep_with_interrupt(pre_delay)
+
+        snapshots = []
+        state_hits = {}
+        chosen = None
+        for idx in range(ticks):
+            snapshot = self._collect_red_icon_zone_snapshot()
+            snapshots.append(snapshot)
+            state_key = (snapshot["safe_present"], snapshot["forbidden_present"])
+            state_hits[state_key] = state_hits.get(state_key, 0) + 1
+
+            if state_hits[state_key] >= required_consensus:
+                chosen = snapshot
+                break
+
+            if idx < ticks - 1 and post_delay > 0:
+                self._sleep_with_interrupt(post_delay)
+
+        if chosen is None:
+            chosen = snapshots[-1] if snapshots else {
+                "safe_icons": [],
+                "safe_count": 0,
+                "forbidden_count": 0,
+                "safe_present": False,
+                "forbidden_present": False,
+            }
+
+        logger.debug(
+            "Forbidden-zone debounce completed: ticks=%s required=%s states=%s chosen=(safe=%s forbidden=%s)",
+            len(snapshots),
+            required_consensus,
+            {f"{int(k[0])}/{int(k[1])}": v for k, v in state_hits.items()},
+            int(chosen["safe_present"]),
+            int(chosen["forbidden_present"]),
+        )
+
+        return {
+            "safe_present": chosen["safe_present"],
+            "forbidden_present": chosen["forbidden_present"],
+            "actionable_icons": chosen["safe_icons"],
+            "forbidden_count": chosen["forbidden_count"],
+        }
     
     def handle_click_red_icon(self, current_state):
         self.check_critical_interrupts()
