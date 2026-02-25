@@ -319,6 +319,23 @@ class MouseController:
                 return False
 
             screen_x, screen_y = screen_pos
+
+            # Hard pre-dispatch boundary recheck.
+            # Slow-is-smooth guard: verify twice before firing a click.
+            boundary_recheck_delay = max(0.0, float(getattr(config, "BOUNDARY_RECHECK_DELAY", 0.0)))
+            if boundary_recheck_delay > 0:
+                self._sleep(boundary_recheck_delay)
+
+            if not self.is_safe_to_click(screen_x, screen_y, relative=False):
+                logger.warning(
+                    "Click dispatch aborted during pre-fire boundary recheck at (%s, %s)",
+                    screen_x,
+                    screen_y,
+                )
+                if wait_after:
+                    self._sleep(self.click_delay if delay is None else delay)
+                return False
+
             self._send_click(screen_x, screen_y)
 
             logger.info(f"Clicked at ({screen_x}, {screen_y})")
