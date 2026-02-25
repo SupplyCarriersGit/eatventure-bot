@@ -681,6 +681,8 @@ class EatventureBot:
         self._recent_red_icon_history = []
         self._no_red_scroll_cycle_pending = False
         self._last_forbidden_scroll_time = 0.0
+        self._last_forbidden_reposition_reason = None
+        self.allowed_interaction_assets = {"red_icon", "upgrade_station", "box"}
 
         self.forbidden_zones = [
             (zone["x_min"], zone["x_max"], zone["y_min"], zone["y_max"])
@@ -825,16 +827,127 @@ class EatventureBot:
         return clicked
 
     def _scroll_away_from_forbidden_zone(self, y_position):
-        # Disabled intentionally.
-        #
-        # One-Scroll Rule: all scrolling must be performed only by
-        # execute_oscillating_search(). Forbidden-zone handling now skips the
-        # blocked icon instead of performing an ad-hoc directional scroll.
+        # One-Scroll Rule: never perform ad-hoc directional scrolls here.
+        # We only mark intent and allow state flow to route to State.SCROLL.
         logger.info(
-            "Red icon in forbidden zone at y=%s; skipping icon (ad-hoc forbidden-zone scrolling disabled)",
+            "Authorized target in forbidden zone at y=%s; routing to oscillating search",
             y_position,
         )
+        self._last_forbidden_reposition_reason = f"forbidden-target-y:{y_position}"
+        return True
+
+    def _is_actionable_asset_type(self, asset_type):
+        return asset_type in self.allowed_interaction_assets
+
+    def _verify_authorized_asset_profile(self, asset_type, x, y, screenshot=None, threshold_override=None):
+        """
+        Strict interaction whitelist.
+        Returns True only for authorized assets whose profile is re-validated at target coordinates.
+        """
+        if not self._is_actionable_asset_type(asset_type):
+            logger.warning("Blocked non-whitelisted asset interaction request: %s", asset_type)
+            return False
+
+        pre_delay = max(0.0, float(getattr(config, "INTERACTION_VERIFY_PRE_DELAY", 0.0)))
+        post_delay = max(0.0, float(getattr(config, "INTERACTION_VERIFY_POST_DELAY", 0.0)))
+        if pre_delay > 0:
+            self.sleep(pre_delay)
+
+        frame = screenshot if screenshot is not None else self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+
+        if asset_type == "red_icon":
+            icon_x = x - config.RED_ICON_OFFSET_X
+            icon_y = y - config.RED_ICON_OFFSET_Y
+            verified = self._is_red_icon_present_at(
+                icon_x,
+                icon_y,
+                screenshot=frame,
+                threshold_override=threshold_override,
+            )
+        elif asset_type == "upgrade_station":
+            verified = self._verify_template_presence(
+                "upgradeStation",
+                x,
+                y,
+                screenshot=frame,
+                radius=getattr(config, "UPGRADE_STATION_REFINE_RADIUS", 20),
+                threshold=threshold_override,
+                check_color=config.UPGRADE_STATION_COLOR_CHECK,
+            )
+        elif asset_type == "box":
+            verified = self._verify_any_box_presence(x, y, screenshot=frame, threshold=threshold_override)
+        else:
+            verified = False
+
+        if post_delay > 0:
+            self.sleep(post_delay)
+
+        return verified
+
+    def _verify_template_presence(self, template_name, x, y, screenshot, radius, threshold, check_color=False):
+        template_data = self.templates.get(template_name)
+        if template_data is None:
+            return False
+
+        template, mask = template_data
+        height, width = screenshot.shape[:2]
+        x1 = max(0, int(x - radius))
+        y1 = max(0, int(y - radius))
+        x2 = min(width, int(x + radius))
+        y2 = min(height, int(y + radius))
+        roi = screenshot[y1:y2, x1:x2]
+        if roi.size == 0:
+            return False
+
+        found, _, local_x, local_y = self.image_matcher.find_template(
+            roi,
+            template,
+            mask=mask,
+            threshold=threshold,
+            template_name=f"{template_name}-whitelist-verify",
+            check_color=check_color,
+        )
+        if not found:
+            return False
+
+        abs_x = local_x + x1
+        abs_y = local_y + y1
+        tolerance = max(4, int(radius // 2))
+        return abs(abs_x - x) <= tolerance and abs(abs_y - y) <= tolerance
+
+    def _verify_any_box_presence(self, x, y, screenshot, threshold):
+        for box_name in ("box1", "box2", "box3", "box4", "box5"):
+            if self._verify_template_presence(
+                box_name,
+                x,
+                y,
+                screenshot=screenshot,
+                radius=32,
+                threshold=threshold,
+                check_color=False,
+            ):
+                return True
         return False
+
+    def _guarded_authorized_click(self, asset_type, x, y, *, screenshot=None, threshold_override=None, wait_after=True):
+        """Whitelist + boundary hard gate wrapper for click dispatch."""
+        if not self._verify_authorized_asset_profile(
+            asset_type,
+            x,
+            y,
+            screenshot=screenshot,
+            threshold_override=threshold_override,
+        ):
+            logger.info("Asset verification rejected click for %s at (%s, %s)", asset_type, x, y)
+            return False, False
+
+        if self.mouse_controller.is_in_forbidden_zone(x, y):
+            logger.warning("%s target at (%s, %s) blocked by forbidden zone", asset_type, x, y)
+            self._scroll_away_from_forbidden_zone(y)
+            return False, True
+
+        clicked = self.mouse_controller.click(x, y, relative=True, wait_after=wait_after)
+        return clicked, False
 
     def resolve_priority_state(self, current_state):
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
@@ -1751,20 +1864,26 @@ class EatventureBot:
                 check_color=config.UPGRADE_STATION_COLOR_CHECK,
             )
             if found:
-                if self.mouse_controller.is_in_forbidden_zone(x, y):
-                    logger.debug("Fallback scan: upgrade station in forbidden zone, skipping")
-                else:
-                    logger.info(
-                        "Fallback scan: clicking upgrade station at (%s, %s) [%.2f%%]",
-                        x,
-                        y,
-                        confidence * 100,
-                    )
-                    if self.mouse_controller.click(x, y, relative=True):
-                        clicked_targets += 1
-                        clicked_upgrade_station = True
-                        self.upgrade_found_in_cycle = True
-                        self.vision_optimizer.update_upgrade_station_confidence(confidence)
+                logger.info(
+                    "Fallback scan: evaluating upgrade station at (%s, %s) [%.2f%%]",
+                    x,
+                    y,
+                    confidence * 100,
+                )
+                clicked, blocked_forbidden = self._guarded_authorized_click(
+                    "upgrade_station",
+                    x,
+                    y,
+                    screenshot=screenshot,
+                    threshold_override=upgrade_threshold,
+                )
+                if blocked_forbidden:
+                    self._no_red_scroll_cycle_pending = True
+                elif clicked:
+                    clicked_targets += 1
+                    clicked_upgrade_station = True
+                    self.upgrade_found_in_cycle = True
+                    self.vision_optimizer.update_upgrade_station_confidence(confidence)
 
         for box_name in ("box1", "box2", "box3", "box4", "box5"):
             box_template = self.templates.get(box_name)
@@ -1789,18 +1908,23 @@ class EatventureBot:
                 self.vision_optimizer.update_box_miss()
                 continue
 
-            if self.mouse_controller.is_in_forbidden_zone(x, y):
-                logger.debug("Fallback scan: %s in forbidden zone, skipping", box_name)
-                continue
-
             logger.info(
-                "Fallback scan: clicking %s at (%s, %s) [%.2f%%]",
+                "Fallback scan: evaluating %s at (%s, %s) [%.2f%%]",
                 box_name,
                 x,
                 y,
                 confidence * 100,
             )
-            if self.mouse_controller.click(x, y, relative=True):
+            clicked, blocked_forbidden = self._guarded_authorized_click(
+                "box",
+                x,
+                y,
+                screenshot=screenshot,
+                threshold_override=box_threshold,
+            )
+            if blocked_forbidden:
+                self._no_red_scroll_cycle_pending = True
+            elif clicked:
                 clicked_targets += 1
                 clicked_box = True
                 self.vision_optimizer.update_box_confidence(confidence)
@@ -2105,7 +2229,7 @@ class EatventureBot:
         if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
             if self._scroll_away_from_forbidden_zone(click_y):
-                return State.FIND_RED_ICONS
+                return State.SCROLL
             
             if self._new_level_event.is_set():
                 return State.TRANSITION_LEVEL
@@ -2114,7 +2238,16 @@ class EatventureBot:
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
         
         logger.info(f"Clicking red icon {self.current_red_icon_index + 1}/{len(self.red_icons)} at ({click_x}, {click_y})")
-        click_success = self.mouse_controller.click(click_x, click_y, relative=True)
+        click_success, blocked_forbidden = self._guarded_authorized_click(
+            "red_icon",
+            click_x,
+            click_y,
+            screenshot=limited_screenshot,
+            threshold_override=relaxed_threshold,
+        )
+        if blocked_forbidden:
+            return State.SCROLL
+
         self.tuner.record_click_result(click_success)
         self._apply_tuning()
         
@@ -2259,7 +2392,18 @@ class EatventureBot:
             self.upgrade_station_pos = click_refined_pos
 
         if self.mouse_controller.is_in_forbidden_zone(x, y):
-            logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
+            logger.warning("Upgrade station position is in forbidden zone; triggering oscillating search reposition")
+            self._scroll_away_from_forbidden_zone(y)
+            return State.SCROLL
+
+        if not self._verify_authorized_asset_profile(
+            "upgrade_station",
+            x,
+            y,
+            screenshot=limited_screenshot,
+            threshold_override=hold_threshold,
+        ):
+            logger.warning("Upgrade station whitelist verification failed before hold; returning to search")
             self.red_icon_processed_count += 1
             self.current_red_icon_index += 1
             if self.current_red_icon_index < len(self.red_icons):
@@ -2366,10 +2510,17 @@ class EatventureBot:
                 )
                 
                 if found:
-                    if self.mouse_controller.is_in_forbidden_zone(x, y):
-                        logger.debug(f"{box_name} in forbidden zone, skipping")
-                    else:
-                        self.mouse_controller.click(x, y, relative=True)
+                    clicked, blocked_forbidden = self._guarded_authorized_click(
+                        "box",
+                        x,
+                        y,
+                        screenshot=limited_screenshot,
+                        threshold_override=box_threshold,
+                    )
+                    if blocked_forbidden:
+                        logger.warning("%s detected in forbidden zone; initiating oscillating search", box_name)
+                        return State.SCROLL
+                    if clicked:
                         boxes_found += 1
                         self.vision_optimizer.update_box_confidence(confidence)
                 else:
