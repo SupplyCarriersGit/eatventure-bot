@@ -104,7 +104,9 @@ class OscillatingSearcher:
             return main_hit
 
         if f_check:
-            f_check()
+            fallback_hit = f_check()
+            if fallback_hit:
+                return fallback_hit
             
         return None
 
