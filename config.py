@@ -32,10 +32,10 @@ LOGS_DIR = "logs"
 MATCH_THRESHOLD = 0.98
 
 # Specific thresholds for different game assets
-RED_ICON_THRESHOLD = 0.94
+RED_ICON_THRESHOLD = 0.97
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95
 STATS_RED_ICON_THRESHOLD = 0.97
-UPGRADE_STATION_THRESHOLD = 0.8
+UPGRADE_STATION_THRESHOLD = 0.94
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.95
 NEW_LEVEL_THRESHOLD = 0.98
@@ -65,7 +65,7 @@ RED_ICON_REFINE_RADIUS = 18
 RED_ICON_REFINE_THRESHOLD_DROP = 0.02
 
 # Upgrade station specific detection
-UPGRADE_STATION_COLOR_CHECK = True
+UPGRADE_STATION_COLOR_CHECK = False
 UPGRADE_STATION_REFINE_RADIUS = 28
 UPGRADE_STATION_CLICK_REFINE_RADIUS = 18
 
@@ -117,8 +117,8 @@ SCROLL_DISTANCE_RATIO = 1  # Default multiplier for non-incremental scrolls
 # ARITHMETIC SEARCH STRATEGY
 # ==========================================
 # Arithmetic Progression Strategy: Area expands each cycle (1, 3, 5, 7...)
-MAX_SCROLL_CYCLES = 15      # Maximum widening steps before resetting
-SCROLL_INCREMENT_STEP = 1   # Number of scrolls to add per cycle
+MAX_SCROLL_CYCLES = 5      # Maximum widening steps before resetting
+SCROLL_INCREMENT_STEP = 3   # Number of scrolls to add per cycle
 SCROLL_INTERVAL_PAUSE = 0.4 # Extra per-scroll pause avoids scanning during inertial easing tails.
 POST_SCROLL_SETTLE = 0.45  # Heavier post-swipe settle guarantees a static frame before template matching runs.
 CYCLE_PAUSE_DURATION = 0.45  # Added cycle boundary padding prevents direction-flip scans on still-moving UI.
@@ -337,9 +337,9 @@ AI_LEARNING_MAX_SEARCH_INTERVAL = 0.09  # Keep learner clamp aligned with tuner 
 ###  TELEGRAM NOTIFICATIONS ###
 ###############################
 
-TELEGRAM_ENABLED = True
-TELEGRAM_BOT_TOKEN = "8244889019:AAFFqf1dn4d3LbHf3tenOXEBaoruj3FWkR0"
-TELEGRAM_CHAT_ID = "770506304"
+TELEGRAM_ENABLED = False
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
 
 
 ###############################
