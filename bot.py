@@ -255,11 +255,12 @@ class EatventureBot:
             self._last_idle_click_time = time.monotonic()
         return clicked
 
-    def _scroll_away_from_forbidden_zone(self, y_position):
+    def _scroll_away_from_forbidden_zone(self, y_position, asset_name="asset"):
         # One-Scroll Rule retained: do not execute manual directional drags here.
         # Instead, redirect the FSM into the canonical oscillating search cycle.
         logger.warning(
-            "Red icon in forbidden zone at y=%s; redirecting to Main Loop Scroll (Oscillating Search)",
+            "%s in forbidden zone at y=%s; redirecting to Main Loop Scroll (Oscillating Search)",
+            asset_name,
             y_position,
         )
         now = time.monotonic()
@@ -273,6 +274,47 @@ class EatventureBot:
             self._sleep_with_interrupt(wait_remaining)
         self._last_forbidden_scroll_time = time.monotonic()
         return True
+
+    def _is_asset_click_safe(self, asset_name, x, y):
+        precheck_delay = max(0.0, float(getattr(config, "ASSET_BOUNDARY_PRECHECK_DELAY", 0.0)))
+        confirm_delay = max(0.0, float(getattr(config, "ASSET_BOUNDARY_CONFIRM_DELAY", 0.0)))
+
+        if precheck_delay > 0:
+            self._sleep_with_interrupt(precheck_delay)
+
+        first_safe = self.mouse_controller.is_safe_to_click(x, y, relative=True)
+        if not first_safe:
+            logger.warning(
+                "%s blocked by forbidden-zone pre-click validator at (%s, %s)",
+                asset_name,
+                x,
+                y,
+            )
+            return False
+
+        if confirm_delay > 0:
+            self._sleep_with_interrupt(confirm_delay)
+
+        second_safe = self.mouse_controller.is_safe_to_click(x, y, relative=True)
+        if not second_safe:
+            logger.warning(
+                "%s blocked by forbidden-zone confirmation validator at (%s, %s)",
+                asset_name,
+                x,
+                y,
+            )
+            return False
+
+        return True
+
+    def _redirect_forbidden_asset_to_scroll(self, asset_name, x, y):
+        logger.info(
+            "%s forbidden-zone redirect requested for (%s, %s)",
+            asset_name,
+            x,
+            y,
+        )
+        return self._scroll_away_from_forbidden_zone(y, asset_name=asset_name)
 
     def resolve_priority_state(self, current_state):
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
@@ -532,6 +574,8 @@ class EatventureBot:
             
             # 3. Check for Fallback Assets (Upgrade Station, Boxes)
             clicked = self._scan_and_click_non_red_assets(screenshot)
+            if clicked == -1:
+                return State.SCROLL
             if clicked > 0:
                 # We clicked something, need to re-evaluate state
                 return State.FIND_RED_ICONS
@@ -1189,8 +1233,10 @@ class EatventureBot:
                 check_color=config.UPGRADE_STATION_COLOR_CHECK,
             )
             if found:
-                if self.mouse_controller.is_in_forbidden_zone(x, y):
-                    logger.debug("Fallback scan: upgrade station in forbidden zone, skipping")
+                if not self._is_asset_click_safe("Upgrade Station", x, y):
+                    logger.debug("Fallback scan: upgrade station in forbidden zone, redirecting to oscillating search")
+                    if self._redirect_forbidden_asset_to_scroll("Upgrade Station", x, y):
+                        return -1
                 else:
                     logger.info(
                         "Fallback scan: clicking upgrade station at (%s, %s) [%.2f%%]",
@@ -1203,6 +1249,9 @@ class EatventureBot:
                         clicked_upgrade_station = True
                         self.upgrade_found_in_cycle = True
                         self.vision_optimizer.update_upgrade_station_confidence(confidence)
+                    elif self.mouse_controller.is_in_forbidden_zone(x, y):
+                        if self._redirect_forbidden_asset_to_scroll("Upgrade Station", x, y):
+                            return -1
 
         for box_name in ("box1", "box2", "box3", "box4", "box5"):
             box_template = self.templates.get(box_name)
@@ -1540,9 +1589,9 @@ class EatventureBot:
         click_x = x + config.RED_ICON_OFFSET_X
         click_y = y + config.RED_ICON_OFFSET_Y
         
-        if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
+        if not self._is_asset_click_safe("Red Icon", click_x, click_y):
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
-            if self._scroll_away_from_forbidden_zone(click_y):
+            if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
                 return State.SCROLL
             
             if self._new_level_event.is_set():
@@ -1563,7 +1612,7 @@ class EatventureBot:
                     click_x,
                     click_y,
                 )
-                if self._scroll_away_from_forbidden_zone(click_y):
+                if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
                     return State.SCROLL
 
             self.current_red_icon_index += 1
@@ -1709,13 +1758,11 @@ class EatventureBot:
             self._last_upgrade_station_pos = click_refined_pos
             self.upgrade_station_pos = click_refined_pos
 
-        if self.mouse_controller.is_in_forbidden_zone(x, y):
-            logger.warning("Upgrade station position is in forbidden zone; skipping clicks")
-            self.red_icon_processed_count += 1
-            self.current_red_icon_index += 1
-            if self.current_red_icon_index < len(self.red_icons):
-                return State.CLICK_RED_ICON
-            return State.OPEN_BOXES
+        if not self._is_asset_click_safe("Upgrade Station", x, y):
+            logger.warning("Upgrade station position is in forbidden zone; redirecting to oscillating search")
+            if self._redirect_forbidden_asset_to_scroll("Upgrade Station", x, y):
+                return State.SCROLL
+            return State.FIND_RED_ICONS
         
         logger.info("Holding upgrade station click...")
 
