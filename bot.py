@@ -200,6 +200,12 @@ class EatventureBot:
     def _monitor_new_level(self):
         interval = config.NEW_LEVEL_MONITOR_INTERVAL
         while not self._new_level_monitor_stop.is_set():
+            # YIELD PRIORITY: Back off if main thread is in critical interaction
+            active_state = self.state_machine.get_state()
+            if active_state in (State.CLICK_RED_ICON, State.HOLD_UPGRADE_STATION, State.TRANSITION_LEVEL):
+                time.sleep(max(interval, 0.2)) # Significant back-off duration
+                continue
+
             if self._new_level_event.is_set():
                 time.sleep(max(interval, 0.01))
                 continue
@@ -1165,7 +1171,7 @@ class EatventureBot:
         as soon as a safe actionable icon is detected.
         """
         self.check_critical_interrupts()
-        screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+        screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=False)
         # IMPORTANT: Do not run temporal debouncing here.
         # _stable_red_icons mutates shared history and would "prime" the cache before
         # the main priority pass in the same interval.
@@ -1174,9 +1180,15 @@ class EatventureBot:
         if not red_icons:
             return None
 
-        prioritized_icons = self._prioritize_red_icons(red_icons)
+        # ACTION STEP: Filter for safety BEFORE prioritizing/truncating
+        safe_icons, _ = self._filter_forbidden_red_icons(red_icons)
+        if not safe_icons:
+            return None
+
+        prioritized_icons = self._prioritize_red_icons(safe_icons)
         actionable_icons = []
         for confidence, x, y, *_ in prioritized_icons:
+            # Re-verify specific click point (center + offset)
             click_x = x + config.RED_ICON_OFFSET_X
             click_y = y + config.RED_ICON_OFFSET_Y
 

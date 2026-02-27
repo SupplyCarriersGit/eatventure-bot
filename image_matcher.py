@@ -11,8 +11,8 @@ class ImageMatcher:
     def __init__(self, threshold=0.85):
         self.threshold = threshold
         cv2.setUseOptimized(True)
-        cpu_count = os.cpu_count() or 1
-        cv2.setNumThreads(cpu_count)
+        # Limit to 1 thread to prevent CPU starvation between monitor and worker threads
+        cv2.setNumThreads(1)
 
     def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
         # ... existing logic ...
